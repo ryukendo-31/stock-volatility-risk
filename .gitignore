@@ -1,0 +1,22 @@
+# Python Checkpoints
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment (Crucial!)
+venv/
+env/
+.env
+
+# Data (Don't commit large files, we have loader.py for this)
+data/raw/
+data/processed/
+
+# IDE Settings
+.vscode/
+.idea/
+*.swp
+
+# OS generated files
+.DS_Store
+Thumbs.db
