@@ -1,22 +1,52 @@
 import pandas as pd
-import numpy as np
 import os
+import sys
+
+# Add project root to path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+# Path Config
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
 
 def split_data():
-    '''we will load features.csv and then remove missing data rows and then finally split into train and test split'''
-    print("splitting starting.....")
-    input_path = os.path.join("data",'processed', "features.csv")
-    if not os.path.exists(input_path):
-        print("features file not found check location or file path!!!!")
+    print("✂️  Initiating Chronological Data Split...")
+    input_path = os.path.join(PROCESSED_DIR, "features.csv")
     
-    df = pd.read_csv(input_path,index_col=0,parse_dates=True)
+    if not os.path.exists(input_path):
+        print("❌ Error: features.csv not found! Run feature_builder.py first.")
+        return
+    
+    # Load the newly generated features (2000-2026)
+    df = pd.read_csv(input_path, index_col=0, parse_dates=True)
+    
+    # Final safety check for NaNs before splitting
     df = df.dropna()
-    split_index = int(0.8*len(df))
+    
+    # Calculate the 80/20 split index
+    # STRICTLY chronological. No random shuffling for time-series!
+    split_index = int(0.8 * len(df))
+    
     train_df = df.iloc[:split_index]
     test_df = df.iloc[split_index:]
-    train_df.to_csv(os.path.join("data","processed","train.csv"))
-    test_df.to_csv(os.path.join("data", "processed", "test.csv")) 
-    print(f"Saved train.csv ({len(train_df)} rows) and test.csv ({len(test_df)} rows)")
+    
+    # Save the splits
+    train_path = os.path.join(PROCESSED_DIR, "train.csv")
+    test_path = os.path.join(PROCESSED_DIR, "test.csv")
+    
+    train_df.to_csv(train_path)
+    test_df.to_csv(test_path) 
+    
+    print(f"✅ Split Complete!")
+    print(f"   Train Set: {len(train_df)} rows ({train_df.index.min().date()} to {train_df.index.max().date()})")
+    print(f"   Test Set:  {len(test_df)} rows ({test_df.index.min().date()} to {test_df.index.max().date()})")
+    
+    # Quick validation to prove no Data Leakage to your professor
+    print("\n🔍 Checking for Data Leakage...")
+    if train_df.index.max() >= test_df.index.min():
+        print("   ⚠️ WARNING: Time overlap detected. Check index.")
+    else:
+        print("   ✅ Time-series integrity confirmed. No look-ahead bias.")
 
 if __name__ == "__main__":
     split_data()

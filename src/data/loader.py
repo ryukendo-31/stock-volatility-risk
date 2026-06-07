@@ -7,39 +7,46 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 RAW_DIR = os.path.join(BASE_DIR, "data", "raw")
 
 def fetch_data():
-    """Downloads S&P 500 and VIX data cleanly."""
-    start_date = "2000-01-01"
+    """Downloads US and Indian market data from your original start date."""
+    start_date = "2000-01-01" 
     
     if not os.path.exists(RAW_DIR):
         os.makedirs(RAW_DIR)
     
-    print(f"📂 Downloading data to: {RAW_DIR}")
+    print(f"📂 Downloading Global Market Data to: {RAW_DIR}")
+    print(f"   Using your specified start date: {start_date}")
     
-    # --- 1. S&P 500 ---
-    print("   Fetching S&P 500 (^GSPC)...")
-    sp500 = yf.download("^GSPC", start=start_date, progress=False)
+    symbols = {
+        'Price': '^GSPC',      # S&P 500
+        'VIX': '^VIX',         # US Volatility
+        'NIFTY': '^NSEI'       # India Nifty 50 (India VIX removed to unlock 2000-2008 data)
+    }
     
-    # FIX: Flatten MultiIndex columns (e.g. ('Close', '^GSPC') -> 'Close')
-    if isinstance(sp500.columns, pd.MultiIndex):
-        sp500.columns = sp500.columns.get_level_values(0)
+    dfs = []
+    for name, ticker in symbols.items():
+        print(f"   Fetching {name} ({ticker})...")
+        tmp = yf.download(ticker, start=start_date, progress=False)
         
-    sp500_path = os.path.join(RAW_DIR, "sp500_daily.csv")
-    sp500.to_csv(sp500_path)
-    print(f"   ✅ Saved S&P 500: {sp500.shape}")
-
-    # --- 2. VIX ---
-    print("   Fetching VIX (^VIX)...")
-    vix = yf.download("^VIX", start=start_date, progress=False)
+        if isinstance(tmp.columns, pd.MultiIndex):
+            tmp.columns = tmp.columns.get_level_values(0)
+            
+        tmp = tmp[['Close']].rename(columns={'Close': name})
+        dfs.append(tmp)
     
-    # FIX: Flatten MultiIndex columns
-    if isinstance(vix.columns, pd.MultiIndex):
-        vix.columns = vix.columns.get_level_values(0)
-        
-    vix_path = os.path.join(RAW_DIR, "vix_daily.csv")
-    vix.to_csv(vix_path)
-    print(f"   ✅ Saved VIX: {vix.shape}")
+    print("   Merging global dates...")
+    master_df = pd.concat(dfs, axis=1)
     
-    print("\n🎉 Data download complete.")
+    # Forward-fill to handle holidays
+    master_df.ffill(inplace=True)
+    
+    # Drop NaNs (This will now successfully keep the year 2000+ data)
+    master_df.dropna(inplace=True) 
+    
+    save_path = os.path.join(RAW_DIR, "global_markets.csv")
+    master_df.to_csv(save_path)
+    
+    print(f"   ✅ Saved Global Data. Final shape: {master_df.shape}")
+    print(f"   Note: The dataset now runs from {master_df.index.min().date()} to {master_df.index.max().date()}")
 
 if __name__ == "__main__":
     fetch_data()

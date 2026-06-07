@@ -22,3 +22,10 @@ data/processed/
 Thumbs.db
 
 results/
+scripts/replicate_engle.py
+scripts/trial_baseline.py
+scripts/plot_diagnostics.py
+*.xls
+*.xlsx
+*.xlsm
+*.csv
