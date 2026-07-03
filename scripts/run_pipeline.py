@@ -17,7 +17,7 @@ def main():
     2. Builds features.
     3. Splits data into training and testing sets.
     """
-    print("🚀 ========== STARTING DATA PIPELINE ========== 🚀")
+    print(" ========== STARTING DATA PIPELINE ========== ")
     
     # Step 1: Download raw data
     print("\n[STEP 1/3] Fetching latest market data...")
@@ -32,8 +32,8 @@ def main():
     print("\n[STEP 3/3] Splitting data into train and test sets...")
     split_data()
     
-    print("\n✅ ========== DATA PIPELINE COMPLETED SUCCESSFULLY ========== ✅")
-    print("You can now run 'run_baselines.py' to train and evaluate models.")
+    print("\n ========== DATA PIPELINE COMPLETED SUCCESSFULLY ========== ")
+    print(" now run 'run_baselines.py' to train and evaluate models.")
 
 if __name__ == "__main__":
     main()
