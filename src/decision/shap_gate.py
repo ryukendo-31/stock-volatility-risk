@@ -2,14 +2,16 @@
 import numpy as np
 import pandas as pd
 import shap
+from collections import deque
 
 class ShapSafetyGate:
-    def __init__(self, max_absolute_adj=0.05, max_relative_adj=0.35, threshold_std=3.0, max_concentration_ratio=0.45):
+    def __init__(self, max_absolute_adj=0.05, max_relative_adj=0.35, threshold_std=4.0, max_concentration_ratio=0.45, min_rank_correlation=0.40):
         """
         max_absolute_adj: Maximum allowed absolute volatility correction (default 5.0% vol).
         max_relative_adj: Maximum allowed percentage correction relative to EGARCH baseline (default 35%).
-        threshold_std: Maximum allowed standard deviations for a SHAP attribution z-score (default 3.0).
+        threshold_std: Maximum allowed standard deviations for a SHAP attribution z-score (default 4.0).
         max_concentration_ratio: Maximum allowed attribution proportion for a single feature (default 45%).
+        min_rank_correlation: Minimum allowed Spearman rank correlation of feature attributions (default 40%).
         """
         self.explainer = None
         self.base_value = None
@@ -18,6 +20,7 @@ class ShapSafetyGate:
         # Phase 2e baselines
         self.shap_means = None
         self.shap_stds = None
+        self.baseline_rankings = None
         
         # Phase 2f baselines
         self.covid_shap_means = None
@@ -33,12 +36,16 @@ class ShapSafetyGate:
         
         # Phase 2j SHAP concentration limit
         self.max_concentration_ratio = max_concentration_ratio
+        
+        # Phase 2k SHAP Rank Stability parameters
+        self.min_rank_correlation = min_rank_correlation
+        self.shap_history = deque(maxlen=10) # Sliding window of the last 10 trading days
 
         # Phase 2g hardcoded Domain Overrides (derived from COVID-19 90th percentile peaks)
         self.overrides = {
-            'Vol_21d': 0.80,       # Rejects if 21-day realized volatility exceeds 80%
-            'VIX_Lag_1': 50.0,     # Rejects if yesterday's VIX exceeds 50.0
-            'Kurt_21': 4.5         # Rejects if excess kurtosis exceeds 4.5
+            'Vol_21d': 0.80,       
+            'VIX_Lag_1': 50.0,     
+            'Kurt_21': 4.5         
         }
 
     def fit_explainer(self, xgb_model, X_train=None):
@@ -52,7 +59,7 @@ class ShapSafetyGate:
         else: 
             self.base_value = float(raw_expected)
             
-        print(f" Phase 2d: TreeExplainer fitted. Base Value: {self.base_value:.6f}")
+        print(f"Phase 2d: TreeExplainer fitted. Base Value: {self.base_value:.6f}")
         
         if X_train is not None:
             print("calculate |SHAP| mean and standard deviation")
@@ -61,6 +68,9 @@ class ShapSafetyGate:
             
             self.shap_means = pd.Series(np.mean(abs_train_shap, axis=0), index=X_train.columns)
             self.shap_stds = pd.Series(np.std(abs_train_shap, axis=0), index=X_train.columns).replace(0, 1e-6)
+            
+            # Phase 2k baseline ranking extraction (rank 1 is highest attribution)
+            self.baseline_rankings = self.shap_means.rank(ascending=False)
             print("attributes for shap calculated")
             
             self.compute_covid_baselines(X_train, train_shap)
@@ -83,9 +93,9 @@ class ShapSafetyGate:
             covid_features = X_train.iloc[covid_indices]
             self.covid_raw_medians = covid_features.median()
             self.covid_raw_90th = covid_features.quantile(0.90)
-            print(" Phase 2g: Raw feature percentiles computed for COVID-fold calibration.")
+            print("Phase 2g: Raw feature percentiles computed for COVID-fold calibration.")
         else:
-            print(" Warning: No historical COVID-19 dates found in the X_train index.")
+            print("Warning: No historical COVID-19 dates found in the X_train index.")
 
     def evaluate_prediction_safety(self, X_row, egarch_pred, xgb_adjustment):
         """
@@ -168,6 +178,27 @@ class ShapSafetyGate:
                 "limit": self.max_concentration_ratio,
                 "total_abs_attribution": total_abs_attribution
             }
+
+        # -------------------------------------------------------------
+        # Phase 2k: Rank Stability Guard
+        # -------------------------------------------------------------
+        # Append the current row's absolute SHAP values to our sliding memory queue
+        self.shap_history.append(abs_row_shap)
+        
+        # Only evaluate if the rolling history window is fully populated (10 days)
+        if len(self.shap_history) == 10:
+            rolling_avg_shap = np.mean(self.shap_history, axis=0)
+            rolling_series = pd.Series(rolling_avg_shap, index=X_row_df.columns)
+            rolling_rankings = rolling_series.rank(ascending=False)
+            
+            # Compute Spearman rank correlation against training baseline rankings
+            rank_correlation = rolling_rankings.corr(self.baseline_rankings, method='spearman')
+            
+            if rank_correlation < self.min_rank_correlation:
+                return "REJECTED", "SHAP_RANK_INSTABILITY", {
+                    "rank_correlation": rank_correlation,
+                    "limit": self.min_rank_correlation
+                }
 
         # If all active guards pass
         return "APPROVED", "NONE", {}

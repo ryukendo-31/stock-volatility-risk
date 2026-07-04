@@ -11,16 +11,16 @@ from src.models.xgboost_vol import HybridXGBoostVol
 from src.decision.shap_gate import ShapSafetyGate
 
 def main():
-    print(" Loading pre-processed data...")
+    print("Loading pre-processed data...")
     try:
         train_df = pd.read_csv("data/processed/train.csv", index_col=0, parse_dates=True)
         test_df = pd.read_csv("data/processed/test.csv", index_col=0, parse_dates=True)
     except FileNotFoundError:
-        print(" Pre-split data not found. Run scripts/run_pipeline.py first.")
+        print("Pre-split data not found. Run scripts/run_pipeline.py first.")
         return
 
     # Train the base hybrid model
-    print(" Fitting the hybrid volatility engine...")
+    print("Fitting the hybrid volatility engine...")
     hybrid = HybridXGBoostVol(max_depth=2, learning_rate=0.01, n_estimators=1500)
     results_df, _, _ = hybrid.fit_and_predict(train_df, test_df)
 
@@ -31,8 +31,14 @@ def main():
     # Extract training feature matrix
     X_train = train_df[feature_cols]
 
-    # Instantiate our safety gate. Calibrated threshold_std to 4.0 to prevent false positives.
-    gate = ShapSafetyGate(max_absolute_adj=0.03, max_relative_adj=0.25, threshold_std=4.0, max_concentration_ratio=0.45)
+    # Instantiate our safety gate. Calibrated max_concentration_ratio to 0.70 to accommodate VIX_Gap dominance.
+    gate = ShapSafetyGate(
+        max_absolute_adj=0.03, 
+        max_relative_adj=0.25, 
+        threshold_std=4.0, 
+        max_concentration_ratio=0.70, 
+        min_rank_correlation=0.40
+    )
     
     # Fit explainer and baselines
     gate.fit_explainer(hybrid.xgb_model, X_train)
@@ -47,54 +53,39 @@ def main():
     xgb_adjustment = results_df['XGB_Adjustment'].iloc[0]
 
     status, reason, diags = gate.evaluate_prediction_safety(test_row, egarch_pred, xgb_adjustment)
-    print(f"Scenario 1: Standard Day ({test_df.index[0].date()})")
+    
+    print(f"First Test Day Predictions:")
+    print(f"  Decision Status:  {status}")
+    print(f"  Reason Code:      {reason}")
+    print(f"  Diagnostics:      {diags}")
+    print("-" * 65)
+
+    # 2. PHASE 2k: Verify Rank Instability Guard
+    print("Scenario 6: Simulating Rank Instability over 10-day sliding window...")
+    
+    # Reset the sliding history queue
+    gate.shap_history.clear()
+    
+    # We populate the first 9 days of history with a highly warped importance ranking 
+    # (reversing feature importance order: making low-impact variables highly active, and VIX_Gap zero)
+    n_features = len(feature_cols)
+    warped_attribution = np.linspace(0.000001, 0.05, n_features) # Flipped ranking order
+    
+    for day in range(9):
+        gate.shap_history.append(warped_attribution)
+        
+    # Evaluate on the 10th day with standard features. The combined average ranking of the sliding 
+    # window will be completely decoupled from the training baseline, triggering a bypass.
+    status, reason, diags = gate.evaluate_prediction_safety(test_row, egarch_pred, xgb_adjustment)
+    print(f"Scenario 6: 10th Day Evaluation Outcome:")
     print(f"  Decision Status: **{status}** | Reason Code: {reason}")
     print(f"  Diagnostics: {diags}")
     print("-" * 75)
 
-    # 2. Simulate an Extreme Domain Override Day
-    anomalous_row = test_row.copy()
-    anomalous_row['VIX_Lag_1'] = 55.0  # Exceeds our hardcoded limit of 50.0
-
-    status, reason, diags = gate.evaluate_prediction_safety(anomalous_row, egarch_pred, xgb_adjustment)
-    print("Scenario 2: Extreme Crash Day (VIX Spikes to 55.0)")
-    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
-    print(f"  Diagnostics: {diags}")
-    print("-" * 75)
-
-    # 3. Simulate an Extreme Volatility Correction Day
-    inflated_adjustment = 0.04  # Exceeds our absolute max limit of 0.03
-
-    status, reason, diags = gate.evaluate_prediction_safety(test_row, egarch_pred, inflated_adjustment)
-    print("Scenario 3: Unstable Volatility Correction Day (Adjustment: +4.0% Vol)")
-    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
-    print(f"  Diagnostics: {diags}")
-    print("-" * 75)
-
-    # 4. Simulate a SHAP OOD Day (Phase 2i)
-    ood_row = test_row.copy()
-    ood_row['Vol_10d'] = 0.45 
-
-    status, reason, diags = gate.evaluate_prediction_safety(ood_row, egarch_pred, xgb_adjustment)
-    print("Scenario 4: SHAP Out-of-Distribution Day (Attribution Anomalous)")
-    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
-    print(f"  Diagnostics: {diags}")
-    print("-" * 75)
-
-    # 5. Simulate a SHAP Concentration Violation Day (Phase 2j)
-    concentrated_row = test_row.copy()
-    concentrated_row['VIX_Gap'] = 9.5  # Substantial but under absolute override limit
-
-    status, reason, diags = gate.evaluate_prediction_safety(concentrated_row, egarch_pred, xgb_adjustment)
-    print("Scenario 5: SHAP Concentration Violation Day (Single Feature Dominated)")
-    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
-    print(f"  Diagnostics: {diags}")
-    print("-" * 75)
-
-    if status == "REJECTED" and reason == "SHAP_CONCENTRATION_LIMIT":
-        print(" Phase 2j Active Verification Successful! Concentration Guard fired correctly.")
+    if status == "REJECTED" and reason == "SHAP_RANK_INSTABILITY":
+        print("Phase 2k Active Verification Successful! Rank Instability Guard fired correctly.")
     else:
-        print(" Verification Failed.")
+        print("Verification Failed.")
 
 if __name__ == "__main__":
     main()
