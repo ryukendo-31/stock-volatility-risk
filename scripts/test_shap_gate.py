@@ -30,68 +30,61 @@ def main():
     
     # Extract training feature matrix
     X_train = train_df[feature_cols]
-    
-    # Take the first test row for testing
-    test_row = test_df[feature_cols].iloc[[0]]
-    test_date = test_df.index[0].date()
 
-    print("\n" + "="*65)
-    print("RUNNING SHAP SAFETY GATE CALIBRATION")
-    print("="*65)
-
-    # Instantiate our safety gate
-    gate = ShapSafetyGate()
+    # Instantiate our safety gate (threshold_std set to 3.0)
+    gate = ShapSafetyGate(max_absolute_adj=0.03, max_relative_adj=0.25, threshold_std=3.0)
     
-    # Fit Explainer & Compute Baselines (Phases 2d through 2g)
+    # Fit explainer and baselines
     gate.fit_explainer(hybrid.xgb_model, X_train)
-    
-    # -------------------------------------------------------------
-    # PHASE 2f: Comparative Regime Analysis
-    # -------------------------------------------------------------
-    if gate.shap_means is not None and gate.covid_shap_means is not None:
-        comparison_df = pd.DataFrame({
-            '|SHAP| Normal Mean': gate.shap_means,
-            '|SHAP| COVID Mean': gate.covid_shap_means,
-            'Expansion Ratio (COVID/Normal)': gate.covid_shap_means / gate.shap_means
-        })
-        print("\nPhase 2f: Comparative Regime Attribution Analysis:")
-        print(comparison_df.sort_values(by='Expansion Ratio (COVID/Normal)', ascending=False).to_string())
-        print("-" * 65)
 
-    # -------------------------------------------------------------
-    # PHASE 2g: Domain Overrides Calibration Metrics
-    # -------------------------------------------------------------
-    if gate.covid_raw_medians is not None and gate.covid_raw_90th is not None:
-        # We calculate the overall training standard deviations to compare magnitudes
-        raw_train_stds = X_train.std()
-        raw_train_means = X_train.mean()
-        
-        overrides_calibration_df = pd.DataFrame({
-            'Train Mean (Normal)': raw_train_means,
-            'COVID Median (50th)': gate.covid_raw_medians,
-            'COVID Peak (90th)': gate.covid_raw_90th,
-            'COVID Peak Z-Score': (gate.covid_raw_90th - raw_train_means) / raw_train_stds
-        })
-        print("\nPhase 2g: Raw Feature Stress Percentiles (Calibration Boundaries):")
-        print(overrides_calibration_df.sort_values(by='COVID Peak Z-Score', ascending=False).to_string())
-        print("-" * 65)
+    print("\n" + "="*75)
+    print("RUNNING ACTIVE GATE SIMULATION")
+    print("="*75)
 
-    # Calculate SHAP values for the first test row (Phase 2d verification)
-    shap_vals = gate.compute_shap_values(test_row)
-    row_shap = shap_vals[0]
+    # 1. Simulate a Standard Day
+    test_row = test_df[feature_cols].iloc[[0]]
+    egarch_pred = results_df['EGARCH_Base'].iloc[0]
+    xgb_adjustment = results_df['XGB_Adjustment'].iloc[0]
 
-    # Verify additivity
-    reconstructed_pred = gate.base_value + np.sum(row_shap)
-    actual_xgb_pred = hybrid.xgb_model.predict(test_row)[0]
-    diff = np.abs(reconstructed_pred - actual_xgb_pred)
-    
-    print(f"First Test Day ({test_date}) Predictions:")
-    print(f"  Reconstructed (Base + SHAP Sum):  {reconstructed_pred:.6f}")
-    print(f"  Actual XGBoost Output:            {actual_xgb_pred:.6f}")
-    print(f"  Difference:                       {diff:.2e}")
-    
-    if diff < 1e-5:
-        print(" Calibration Successful!")
+    status, reason, diags = gate.evaluate_prediction_safety(test_row, egarch_pred, xgb_adjustment)
+    print(f"Scenario 1: Standard Day ({test_df.index[0].date()})")
+    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
+    print(f"  Diagnostics: {diags}")
+    print("-" * 75)
+
+    # 2. Simulate an Extreme Domain Override Day
+    anomalous_row = test_row.copy()
+    anomalous_row['VIX_Lag_1'] = 55.0  # Exceeds our hardcoded limit of 50.0
+
+    status, reason, diags = gate.evaluate_prediction_safety(anomalous_row, egarch_pred, xgb_adjustment)
+    print("Scenario 2: Extreme Crash Day (VIX Spikes to 55.0)")
+    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
+    print(f"  Diagnostics: {diags}")
+    print("-" * 75)
+
+    # 3. Simulate an Extreme Volatility Correction Day
+    inflated_adjustment = 0.04  # Exceeds our absolute max limit of 0.03
+
+    status, reason, diags = gate.evaluate_prediction_safety(test_row, egarch_pred, inflated_adjustment)
+    print("Scenario 3: Unstable Volatility Correction Day (Adjustment: +4.0% Vol)")
+    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
+    print(f"  Diagnostics: {diags}")
+    print("-" * 75)
+
+    # 4. Simulate a SHAP OOD Day (Phase 2i)
+    # We increase Vol_10d moderately. It is below the 0.80 absolute limit, 
+    # but represents a massive statistical outlier for the model's expected attribution.
+    ood_row = test_row.copy()
+    ood_row['Vol_10d'] = 0.45 
+
+    status, reason, diags = gate.evaluate_prediction_safety(ood_row, egarch_pred, xgb_adjustment)
+    print("Scenario 4: SHAP Out-of-Distribution Day (Attribution Anomalous)")
+    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
+    print(f"  Diagnostics: {diags}")
+    print("-" * 75)
+
+    if status == "REJECTED" and reason == "SHAP_OOD_LIMIT":
+        print(" Phase 2i Active Verification Successful! SHAP OOD Guard fired correctly.")
     else:
         print(" Verification Failed.")
 
