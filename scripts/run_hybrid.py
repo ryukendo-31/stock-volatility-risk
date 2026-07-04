@@ -13,7 +13,7 @@ from src.models.xgboost_vol import HybridXGBoostVol
 from src.evaluation.diagnostics import diebold_mariano_test, compute_qlike_loss
 
 def main():
-    print("🚀 Starting the Expanding-Window Walk-Forward Hybrid Backtest...")
+    print(" Starting the Expanding-Window Walk-Forward Hybrid Backtest...")
     
     # Configure local SQLite database tracking
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
@@ -23,7 +23,7 @@ def main():
     try:
         features_df = pd.read_csv("data/processed/features.csv", index_col=0, parse_dates=True)
     except FileNotFoundError:
-        print("❌ features.csv not found. Run scripts/run_pipeline.py first.")
+        print(" features.csv not found. Run scripts/run_pipeline.py first.")
         return
 
     # Clean the dataset to ensure contiguous records
@@ -87,7 +87,7 @@ def main():
     }, index=pd.to_datetime(test_dates))
 
     print("\n" + "="*75)
-    print("📊 MARKET REGIME BREAKDOWN ANALYSIS (GARCH vs Hybrid)")
+    print("MARKET REGIME BREAKDOWN ANALYSIS (GARCH vs Hybrid)")
     print("="*75)
 
     regimes = {
