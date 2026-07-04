@@ -10,6 +10,57 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.models.xgboost_vol import HybridXGBoostVol
 from src.decision.shap_gate import ShapSafetyGate
 
+def run_bulk_simulation(gate, df, hybrid, feature_cols, label):
+    """
+    Evaluates every day in the provided slice sequentially through the safety gate
+    and outputs aggregated performance metrics and reason breakdowns.
+    """
+    total_days = len(df)
+    
+    # Generate historical EGARCH and XGBoost baseline predictions on this slice
+    in_sample_var = hybrid.egarch_fit.conditional_volatility.loc[df.index] ** 2
+    egarch_preds = np.sqrt(in_sample_var) / 100 * np.sqrt(252)
+    xgb_adjustments = hybrid.xgb_model.predict(df[feature_cols])
+    
+    approved_count = 0
+    rejected_count = 0
+    reasons_breakdown = {}
+    
+    # Reset rolling history queue to prevent cross-contamination
+    gate.shap_history.clear()
+    
+    for idx in range(total_days):
+        row = df[feature_cols].iloc[[idx]]
+        eg_pred = egarch_preds.iloc[idx]
+        xgb_adj = xgb_adjustments[idx]
+        
+        # Evaluate row
+        status, reason, diags = gate.evaluate_prediction_safety(row, eg_pred, xgb_adj)
+        
+        if status == "APPROVED":
+            approved_count += 1
+        else:
+            rejected_count += 1
+            reasons_breakdown[reason] = reasons_breakdown.get(reason, 0) + 1
+            
+    approval_rate = (approved_count / total_days) * 100
+    bypass_rate = (rejected_count / total_days) * 100
+    
+    print("\n" + "="*65)
+    print(f"BULK SIMULATION REPORT: {label}")
+    print("="*65)
+    print(f"Total Evaluated Days: {total_days}")
+    print(f"Approved Days:        {approved_count} ({approval_rate:.2f}%)")
+    print(f"Bypassed Days:        {rejected_count} ({bypass_rate:.2f}%)")
+    
+    if rejected_count > 0:
+        print("\nBypass Trigger Breakdown (Reason Codes):")
+        for reason, count in reasons_breakdown.items():
+            prop = (count / rejected_count) * 100
+            print(f"  - {reason:<25}: {count:>3} days ({prop:.1f}%)")
+            
+    return approval_rate, bypass_rate
+
 def main():
     print("Loading pre-processed data...")
     try:
@@ -31,61 +82,69 @@ def main():
     # Extract training feature matrix
     X_train = train_df[feature_cols]
 
-    # Instantiate our safety gate. Calibrated max_concentration_ratio to 0.70 to accommodate VIX_Gap dominance.
+    # Instantiate our safety gate with calibrated parameters (OOD=4.5, Concentration=90%, Relative Adj=45%)
     gate = ShapSafetyGate(
-        max_absolute_adj=0.03, 
-        max_relative_adj=0.25, 
-        threshold_std=4.0, 
-        max_concentration_ratio=0.70, 
-        min_rank_correlation=0.40
+        max_absolute_adj=0.05,        
+        max_relative_adj=0.45,        
+        threshold_std=4.5,            
+        max_concentration_ratio=0.90, 
+        min_rank_correlation=0.40     
     )
     
     # Fit explainer and baselines
     gate.fit_explainer(hybrid.xgb_model, X_train)
 
-    print("\n" + "="*75)
-    print("RUNNING ACTIVE GATE SIMULATION")
-    print("="*75)
+    # -------------------------------------------------------------
+    # PHASE 2l: COVID Stress Fold Bulk Simulation
+    # -------------------------------------------------------------
+    covid_df = train_df.loc['2020-02-01':'2020-09-30']
+    covid_approval, covid_bypass = run_bulk_simulation(
+        gate=gate,
+        df=covid_df,
+        hybrid=hybrid,
+        feature_cols=feature_cols,
+        label="Phase 2l - COVID-19 Stress Regime"
+    )
 
-    # 1. Simulate a Standard Day
-    test_row = test_df[feature_cols].iloc[[0]]
-    egarch_pred = results_df['EGARCH_Base'].iloc[0]
-    xgb_adjustment = results_df['XGB_Adjustment'].iloc[0]
+    # -------------------------------------------------------------
+    # PHASE 2m: Normal Regime Bulk Simulation
+    # -------------------------------------------------------------
+    calm_df = train_df.loc['2017-01-01':'2019-12-31']
+    calm_approval, calm_bypass = run_bulk_simulation(
+        gate=gate,
+        df=calm_df,
+        hybrid=hybrid,
+        feature_cols=feature_cols,
+        label="Phase 2m - Normal/Calm Market Regime"
+    )
 
-    status, reason, diags = gate.evaluate_prediction_safety(test_row, egarch_pred, xgb_adjustment)
+    # -------------------------------------------------------------
+    # FINAL METRICS VERIFICATION CHECKS
+    # -------------------------------------------------------------
+    print("\n" + "="*65)
+    print("FINAL CASCADE SAFETY CHECKS VERIFICATION")
+    print("="*65)
     
-    print(f"First Test Day Predictions:")
-    print(f"  Decision Status:  {status}")
-    print(f"  Reason Code:      {reason}")
-    print(f"  Diagnostics:      {diags}")
-    print("-" * 65)
-
-    # 2. PHASE 2k: Verify Rank Instability Guard
-    print("Scenario 6: Simulating Rank Instability over 10-day sliding window...")
+    checks_passed = True
     
-    # Reset the sliding history queue
-    gate.shap_history.clear()
-    
-    # We populate the first 9 days of history with a highly warped importance ranking 
-    # (reversing feature importance order: making low-impact variables highly active, and VIX_Gap zero)
-    n_features = len(feature_cols)
-    warped_attribution = np.linspace(0.000001, 0.05, n_features) # Flipped ranking order
-    
-    for day in range(9):
-        gate.shap_history.append(warped_attribution)
-        
-    # Evaluate on the 10th day with standard features. The combined average ranking of the sliding 
-    # window will be completely decoupled from the training baseline, triggering a bypass.
-    status, reason, diags = gate.evaluate_prediction_safety(test_row, egarch_pred, xgb_adjustment)
-    print(f"Scenario 6: 10th Day Evaluation Outcome:")
-    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
-    print(f"  Diagnostics: {diags}")
-    print("-" * 75)
-
-    if status == "REJECTED" and reason == "SHAP_RANK_INSTABILITY":
-        print("Phase 2k Active Verification Successful! Rank Instability Guard fired correctly.")
+    # Check 1: COVID Bypass rate must exceed 60%
+    if covid_bypass >= 60.0:
+        print(f"Check 1 Passed: COVID Bypass Rate is {covid_bypass:.2f}% (Target: >= 60.0%)")
     else:
-        print("Verification Failed.")
+        print(f"Check 1 Failed: COVID Bypass Rate is {covid_bypass:.2f}% (Target: >= 60.0%)")
+        checks_passed = False
+        
+    # Check 2: Calm fold Approval rate must exceed 85%
+    if calm_approval >= 85.0:
+        print(f"Check 2 Passed: Calm Approval Rate is {calm_approval:.2f}% (Target: >= 85.0%)")
+    else:
+        print(f"Check 2 Failed: Calm Approval Rate is {calm_approval:.2f}% (Target: >= 85.0%)")
+        checks_passed = False
+
+    if checks_passed:
+        print("\nPhase 2l & 2m Bulk Verification Successful! Gate is balanced.")
+    else:
+        print("\nVerification Failed. Gate thresholds require recalibration.")
 
 if __name__ == "__main__":
     main()

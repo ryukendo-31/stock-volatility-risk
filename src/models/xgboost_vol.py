@@ -4,21 +4,27 @@ import numpy as np
 import os
 import xgboost as xgb
 from arch import arch_model
-from sklearn.metrics import mean_squared_error
+from src.decision.shap_gate import ShapSafetyGate
 
 class HybridXGBoostVol:
-    def __init__(self, max_depth=2, learning_rate=0.01, n_estimators=1000, reg_alpha=5.0, reg_lambda=10.0, subsample=0.8, colsample_bytree=0.8):
+    def __init__(self, max_depth=2, learning_rate=0.01, n_estimators=1000, reg_alpha=5.0, reg_lambda=10.0, 
+                 threshold_std=3.5, max_concentration_ratio=0.80, min_rank_correlation=0.40):
+        # XGBoost parameters
         self.max_depth = max_depth
         self.learning_rate = learning_rate
         self.n_estimators = n_estimators
         self.reg_alpha = reg_alpha
         self.reg_lambda = reg_lambda
-        self.subsample = subsample
-        self.colsample_bytree = colsample_bytree
+        
+        # Safety Gate parameters
+        self.threshold_std = threshold_std
+        self.max_concentration_ratio = max_concentration_ratio
+        self.min_rank_correlation = min_rank_correlation
         
         self.egarch_model = None
         self.egarch_fit = None
         self.xgb_model = None
+        self.safety_gate = None
 
     def fit_and_predict(self, train_df, test_df):
         print("1. Fitting baseline Student-t EGARCH(1,1,1) on training set...")
@@ -61,46 +67,85 @@ class HybridXGBoostVol:
         X_tr, X_val = X_train.iloc[:val_split_idx], X_train.iloc[val_split_idx:]
         y_tr, y_val = y_train.iloc[:val_split_idx], y_train.iloc[val_split_idx:]
         
-        # Initialize XGBoost. Pass early_stopping_rounds here to remain fully compliant with v1.6+ and v2.0+
         self.xgb_model = xgb.XGBRegressor(
             max_depth=self.max_depth,
             learning_rate=self.learning_rate,
             n_estimators=self.n_estimators,
             reg_alpha=self.reg_alpha,
             reg_lambda=self.reg_lambda,
-            subsample=self.subsample,
-            colsample_bytree=self.colsample_bytree,
-            early_stopping_rounds=50,  # Correct placement for modern APIs
+            subsample=0.8,
+            colsample_bytree=0.8,
+            early_stopping_rounds=50,
             random_state=42
         )
         
-        # Fit the model with early stopping enabled
         self.xgb_model.fit(
             X_tr, y_tr,
             eval_set=[(X_val, y_val)],
             verbose=False
         )
         
-        # 5. Predict out-of-sample residuals
+        print("3. Initializing and calibrating SHAP Safety Gate...")
+        # Fit the safety gate, passing X_test so COVID benchmarks are calculated out-of-sample
         X_test = test_df[feature_cols]
-        xgb_test_residual_pred = self.xgb_model.predict(X_test)
-        xgb_test_residual_pred = pd.Series(xgb_test_residual_pred, index=test_df.index)
+        self.safety_gate = ShapSafetyGate(
+            max_absolute_adj=0.05,
+            max_relative_adj=0.45,
+            threshold_std=self.threshold_std,
+            max_concentration_ratio=self.max_concentration_ratio,
+            min_rank_correlation=self.min_rank_correlation,
+            min_adj_for_concentration=0.020
+        )
+        self.safety_gate.fit_explainer(self.xgb_model, X_train, X_test=X_test)
         
-        # 6. Combine predictions: EGARCH base + XGBoost residual adjustment
-        hybrid_test_pred = egarch_test_pred + xgb_test_residual_pred
+        print("4. Executing predictions with active SHAP Safety Gate checks...")
+        final_hybrid_preds = []
+        gate_decisions = []
+        gate_reasons = []
+        noise_ratios = []
+        max_z_scores = []
+        xgb_adjustments = []
         
-        # Clip to prevent negative volatility forecasts
-        hybrid_test_pred = np.clip(hybrid_test_pred, 0.01, None)
+        # Evaluate each day sequentially to maintain timeline integrity
+        for idx in range(len(X_test)):
+            row = X_test.iloc[[idx]]
+            eg_pred = egarch_test_pred.iloc[idx]
+            
+            # Generate raw XGBoost adjustment prediction
+            xgb_adj = self.xgb_model.predict(row)[0]
+            xgb_adjustments.append(xgb_adj)
+            
+            # Audit the prediction row via the safety gate
+            status, reason, diags = self.safety_gate.evaluate_prediction_safety(row, eg_pred, xgb_adj)
+            
+            if status == "APPROVED":
+                final_pred = eg_pred + xgb_adj
+            else:
+                # Force standard fallback to baseline econometric model
+                final_pred = eg_pred
+                
+            final_hybrid_preds.append(final_pred)
+            gate_decisions.append(status)
+            gate_reasons.append(reason)
+            noise_ratios.append(diags.get("concentration_ratio", 0.0) if status == "REJECTED" and reason == "SHAP_CONCENTRATION_LIMIT" else 0.0)
+            max_z_scores.append(diags.get("z_score", 0.0) if status == "REJECTED" and reason == "SHAP_OOD_LIMIT" else 0.0)
+            
+        final_hybrid_preds = np.clip(np.array(final_hybrid_preds), 0.01, None)
+        final_hybrid_preds = pd.Series(final_hybrid_preds, index=test_df.index)
         
-        # Save predictions to disk
+        # Save complete predictions and safety decisions for Phase 2o logging
         results_df = pd.DataFrame({
             'Actual': test_df['Target_Vol_Next_5d'],
             'EGARCH_Base': egarch_test_pred,
-            'XGB_Adjustment': xgb_test_residual_pred,
-            'Hybrid_Final': hybrid_test_pred
+            'XGB_Adjustment': xgb_adjustments,
+            'Hybrid_Final': final_hybrid_preds,
+            'Gate_Decision': gate_decisions,
+            'Gate_Reason': gate_reasons,
+            'Max_Z_Score': max_z_scores,
+            'Noise_Ratio': noise_ratios
         }, index=test_df.index)
         
         os.makedirs("results", exist_ok=True)
         results_df.to_csv("results/hybrid_predictions.csv")
         
-        return results_df, egarch_test_pred, hybrid_test_pred
+        return results_df, egarch_test_pred, final_hybrid_preds

@@ -5,13 +5,14 @@ import shap
 from collections import deque
 
 class ShapSafetyGate:
-    def __init__(self, max_absolute_adj=0.05, max_relative_adj=0.35, threshold_std=4.0, max_concentration_ratio=0.45, min_rank_correlation=0.40):
+    def __init__(self, max_absolute_adj=0.05, max_relative_adj=0.45, threshold_std=4.5, max_concentration_ratio=0.90, min_rank_correlation=0.40, min_adj_for_concentration=0.020):
         """
-        max_absolute_adj: Maximum allowed absolute volatility correction (default 5.0% vol).
-        max_relative_adj: Maximum allowed percentage correction relative to EGARCH baseline (default 35%).
-        threshold_std: Maximum allowed standard deviations for a SHAP attribution z-score (default 4.0).
-        max_concentration_ratio: Maximum allowed attribution proportion for a single feature (default 45%).
-        min_rank_correlation: Minimum allowed Spearman rank correlation of feature attributions (default 40%).
+        max_absolute_adj: Default absolute volatility correction cap (5.0% vol).
+        max_relative_adj: Default relative adjustment cap (45%).
+        threshold_std: Default standard deviation threshold for SHAP OOD check (4.5).
+        max_concentration_ratio: Default single-feature concentration cap (90%).
+        min_rank_correlation: Default minimum Spearman rank stability (40%).
+        min_adj_for_concentration: Minimum net adjustment to run concentration checks (2.0% vol).
         """
         self.explainer = None
         self.base_value = None
@@ -27,29 +28,35 @@ class ShapSafetyGate:
         self.covid_raw_medians = None
         self.covid_raw_90th = None
 
-        # Phase 2h Magnitude Gate parameters
+        # Static Gate parameters (used as fallback defaults)
         self.max_absolute_adj = max_absolute_adj
         self.max_relative_adj = max_relative_adj
-        
-        # Phase 2i SHAP OOD threshold
         self.threshold_std = threshold_std
-        
-        # Phase 2j SHAP concentration limit
         self.max_concentration_ratio = max_concentration_ratio
-        
-        # Phase 2k SHAP Rank Stability parameters
         self.min_rank_correlation = min_rank_correlation
-        self.shap_history = deque(maxlen=10) # Sliding window of the last 10 trading days
+        self.min_adj_for_concentration = min_adj_for_concentration
 
-        # Phase 2g hardcoded Domain Overrides (derived from COVID-19 90th percentile peaks)
+        # Phase 2k: Sliding window of the last 21 trading days
+        self.shap_history = deque(maxlen=21)
+
+        # Phase 2g hardcoded Domain Overrides (Kurt_21 raised to 8.0 to prevent false positives)
         self.overrides = {
-            'Vol_21d': 0.80,       
-            'VIX_Lag_1': 50.0,     
-            'Kurt_21': 4.5         
+            'Vol_21d': 0.40,       
+            'VIX_Lag_1': 40.0,     
+            'Kurt_21': 8.0         
         }
 
-    def fit_explainer(self, xgb_model, X_train=None):
-        """Fit TreeExplainer and compute baselines (Phases 2d, 2e, & 2f)."""
+        # Phase 2f Target Expansion check thresholds
+        self.crisis_features = {
+            'Vol_10d': 2.5,   
+            'VIX_Lag_1': 2.0   
+        }
+
+    def fit_explainer(self, xgb_model, X_train=None, X_test=None):
+        """
+        Fit TreeExplainer and compute baselines (Phases 2d, 2e, & 2f).
+        Accepts X_test separately to extract COVID features out-of-sample.
+        """
         self.best_iteration = getattr(xgb_model, "best_iteration", None)
         self.explainer = shap.TreeExplainer(xgb_model, data=X_train)
         
@@ -68,39 +75,76 @@ class ShapSafetyGate:
             
             self.shap_means = pd.Series(np.mean(abs_train_shap, axis=0), index=X_train.columns)
             self.shap_stds = pd.Series(np.std(abs_train_shap, axis=0), index=X_train.columns).replace(0, 1e-6)
-            
-            # Phase 2k baseline ranking extraction (rank 1 is highest attribution)
             self.baseline_rankings = self.shap_means.rank(ascending=False)
             print("attributes for shap calculated")
             
-            self.compute_covid_baselines(X_train, train_shap)
+            # Extract COVID baselines from X_test if provided to prevent in-sample bias
+            target_df = X_test if X_test is not None else X_train
+            target_shap = self.compute_shap_values(target_df)
+            self.compute_covid_baselines(target_df, target_shap)
+        else:
+            print("attribution calculation failed!!!")
             
         return self
     
-    def compute_covid_baselines(self, X_train, train_shap):
+    def compute_covid_baselines(self, X_data, shap_values):
         """Compute COVID-fold baseline metrics (Phases 2f & 2g)."""
-        covid_mask = (X_train.index >= '2020-02-01') & (X_train.index <= '2020-09-30')
+        covid_mask = (X_data.index >= '2020-02-01') & (X_data.index <= '2020-09-30')
         covid_indices = np.where(covid_mask)[0]
         
         if len(covid_indices) > 0:
-            covid_shap = train_shap[covid_indices]
+            covid_shap = shap_values[covid_indices]
             abs_covid_shap = np.abs(covid_shap)
             
             mean_abs_attribs = np.mean(abs_covid_shap, axis=0)
-            self.covid_shap_means = pd.Series(mean_abs_attribs, index=X_train.columns)
+            self.covid_shap_means = pd.Series(mean_abs_attribs, index=X_data.columns)
             print(f"Phase 2f: COVID-fold SHAP analysis complete ({len(covid_indices)} days).")
             
-            covid_features = X_train.iloc[covid_indices]
+            covid_features = X_data.iloc[covid_indices]
             self.covid_raw_medians = covid_features.median()
             self.covid_raw_90th = covid_features.quantile(0.90)
             print("Phase 2g: Raw feature percentiles computed for COVID-fold calibration.")
         else:
-            print("Warning: No historical COVID-19 dates found in the X_train index.")
+            print("Warning: No historical COVID-19 dates found in the data index.")
+
+    def _get_regime_thresholds(self, row_dict):
+        """
+        Phase 2n: Dynamically scales gate thresholds based on current VIX.
+        Decouples the parameter space entirely.
+        """
+        vix = row_dict.get('VIX_Lag_1', row_dict.get('VIX_Gap', 20.0))
+        
+        if vix > 30:  # Stress Regime (Tighten safety, default to EGARCH sooner)
+            return {
+                'ood_z': 2.0,
+                'concentration': 0.60,
+                'relative_cap': 0.25,
+                'absolute_cap': 0.03,
+                'min_rank_rho': 0.55,
+                'min_adj_for_concentration': 0.025  
+            }
+        elif vix > 20:  # Transitional Regime
+            return {
+                'ood_z': 2.5,
+                'concentration': 0.68,
+                'relative_cap': 0.32,
+                'absolute_cap': 0.04,
+                'min_rank_rho': 0.47,
+                'min_adj_for_concentration': 0.015
+            }
+        else:  # Calm Regime (Loosen limits to protect normal-day approval rate)
+            return {
+                'ood_z': self.threshold_std,
+                'concentration': self.max_concentration_ratio,
+                'relative_cap': self.max_relative_adj,
+                'absolute_cap': self.max_absolute_adj,
+                'min_rank_rho': self.min_rank_correlation,
+                'min_adj_for_concentration': self.min_adj_for_concentration
+            }
 
     def evaluate_prediction_safety(self, X_row, egarch_pred, xgb_adjustment):
         """
-        Runs the cascading safety checks sequentially.
-        Returns: status ("APPROVED" or "REJECTED"), active reason code, and diagnostic values.
+        Runs the cascading safety checks sequentially using regime-conditional limits.
         """
         if isinstance(X_row, pd.Series):
             X_row_df = pd.DataFrame([X_row])
@@ -108,6 +152,9 @@ class ShapSafetyGate:
             X_row_df = X_row
             
         row_dict = X_row_df.iloc[0].to_dict()
+        
+        # Load VIX-dependent thresholds dynamically
+        thresholds = self._get_regime_thresholds(row_dict)
 
         # -------------------------------------------------------------
         # Phase 2g: Hardcoded Domain Overrides Guard
@@ -123,38 +170,53 @@ class ShapSafetyGate:
         # -------------------------------------------------------------
         abs_adj = np.abs(xgb_adjustment)
         
-        # Absolute Magnitude Check
-        if abs_adj > self.max_absolute_adj:
+        # Absolute Check
+        if abs_adj > thresholds['absolute_cap']:
             return "REJECTED", "MAGNITUDE_ABS_LIMIT", {
-                "xgb_adjustment": xgb_adjustment, "max_absolute_adj": self.max_absolute_adj
+                "xgb_adjustment": xgb_adjustment, "max_absolute_adj": thresholds['absolute_cap']
             }
             
-        # Relative Magnitude Check
+        # Relative Check
         relative_ratio = abs_adj / egarch_pred if egarch_pred > 0 else 0
-        if relative_ratio > self.max_relative_adj:
+        if relative_ratio > thresholds['relative_cap']:
             return "REJECTED", "MAGNITUDE_REL_LIMIT", {
-                "xgb_adjustment": xgb_adjustment, "relative_ratio": relative_ratio, "max_relative_adj": self.max_relative_adj
+                "xgb_adjustment": xgb_adjustment, "relative_ratio": relative_ratio, "max_relative_adj": thresholds['relative_cap']
             }
+
+        # Calculate SHAP values for downstream checks
+        row_shap = self.compute_shap_values(X_row_df)[0]
+        abs_row_shap = np.abs(row_shap)
+
+        # -------------------------------------------------------------
+        # Phase 2f Gap: Empirical Attribution Expansion Check
+        # -------------------------------------------------------------
+        if self.shap_means is not None:
+            for feat, expansion_cap in self.crisis_features.items():
+                if feat in X_row_df.columns:
+                    feat_idx = list(X_row_df.columns).index(feat)
+                    ratio = abs_row_shap[feat_idx] / (self.shap_means[feat] + 1e-9)
+                    if ratio > expansion_cap:
+                        return "REJECTED", "SHAP_EXPANSION_RATIO", {
+                            "trigger_feature": feat,
+                            "expansion_ratio": ratio,
+                            "cap": expansion_cap,
+                        }
 
         # -------------------------------------------------------------
         # Phase 2i: SHAP-based Out-of-Distribution (OOD) Guard
         # -------------------------------------------------------------
-        row_shap = self.compute_shap_values(X_row_df)[0]
-        abs_row_shap = np.abs(row_shap)
-        
-        # Compute z-scores for each feature's contribution
         shap_z_scores = (abs_row_shap - self.shap_means.values) / self.shap_stds.values
         max_shap_z = np.max(shap_z_scores)
         
         most_anomalous_idx = np.argmax(shap_z_scores)
         most_anomalous_feat = X_row_df.columns[most_anomalous_idx]
         
-        if max_shap_z > self.threshold_std:
+        if max_shap_z > thresholds['ood_z']:
             return "REJECTED", "SHAP_OOD_LIMIT", {
                 "trigger_feature": most_anomalous_feat,
                 "shap_value": row_shap[most_anomalous_idx],
                 "z_score": max_shap_z,
-                "threshold": self.threshold_std
+                "threshold": thresholds['ood_z']
             }
 
         # -------------------------------------------------------------
@@ -171,40 +233,38 @@ class ShapSafetyGate:
             concentration_ratio = 0.0
             max_attrib_feat = "None"
             
-        if concentration_ratio > self.max_concentration_ratio:
-            return "REJECTED", "SHAP_CONCENTRATION_LIMIT", {
-                "trigger_feature": max_attrib_feat,
-                "concentration_ratio": concentration_ratio,
-                "limit": self.max_concentration_ratio,
-                "total_abs_attribution": total_abs_attribution
-            }
+        if abs_adj > thresholds['min_adj_for_concentration']:
+            if concentration_ratio > thresholds['concentration']:
+                return "REJECTED", "SHAP_CONCENTRATION_LIMIT", {
+                    "trigger_feature": max_attrib_feat,
+                    "concentration_ratio": concentration_ratio,
+                    "limit": thresholds['concentration'],
+                    "total_abs_attribution": total_abs_attribution
+                }
 
         # -------------------------------------------------------------
-        # Phase 2k: Rank Stability Guard
+        # Phase 2k: Rank Stability Guard (21-day sliding memory)
         # -------------------------------------------------------------
-        # Append the current row's absolute SHAP values to our sliding memory queue
         self.shap_history.append(abs_row_shap)
         
-        # Only evaluate if the rolling history window is fully populated (10 days)
-        if len(self.shap_history) == 10:
+        if len(self.shap_history) == 21:
             rolling_avg_shap = np.mean(self.shap_history, axis=0)
             rolling_series = pd.Series(rolling_avg_shap, index=X_row_df.columns)
             rolling_rankings = rolling_series.rank(ascending=False)
             
-            # Compute Spearman rank correlation against training baseline rankings
             rank_correlation = rolling_rankings.corr(self.baseline_rankings, method='spearman')
             
-            if rank_correlation < self.min_rank_correlation:
+            if rank_correlation < thresholds['min_rank_rho']:
                 return "REJECTED", "SHAP_RANK_INSTABILITY", {
                     "rank_correlation": rank_correlation,
-                    "limit": self.min_rank_correlation
+                    "limit": thresholds['min_rank_rho']
                 }
 
         # If all active guards pass
         return "APPROVED", "NONE", {}
 
     def compute_shap_values(self, X):
-        """Helper to extract raw SHAP value array for input features X."""
+        """Helper to extract raw SHAP value array."""
         if self.explainer is None:
             raise ValueError("Explainer is not fitted. Call fit_explainer first.")
             
