@@ -4,11 +4,12 @@ import pandas as pd
 import shap
 
 class ShapSafetyGate:
-    def __init__(self, max_absolute_adj=0.05, max_relative_adj=0.35, threshold_std=3.0):
+    def __init__(self, max_absolute_adj=0.05, max_relative_adj=0.35, threshold_std=3.0, max_concentration_ratio=0.45):
         """
         max_absolute_adj: Maximum allowed absolute volatility correction (default 5.0% vol).
         max_relative_adj: Maximum allowed percentage correction relative to EGARCH baseline (default 35%).
         threshold_std: Maximum allowed standard deviations for a SHAP attribution z-score (default 3.0).
+        max_concentration_ratio: Maximum allowed attribution proportion for a single feature (default 45%).
         """
         self.explainer = None
         self.base_value = None
@@ -29,6 +30,9 @@ class ShapSafetyGate:
         
         # Phase 2i SHAP OOD threshold
         self.threshold_std = threshold_std
+        
+        # Phase 2j SHAP concentration limit
+        self.max_concentration_ratio = max_concentration_ratio
 
         # Phase 2g hardcoded Domain Overrides (derived from COVID-19 90th percentile peaks)
         self.overrides = {
@@ -48,7 +52,7 @@ class ShapSafetyGate:
         else: 
             self.base_value = float(raw_expected)
             
-        print(f"✅ Phase 2d: TreeExplainer fitted. Base Value: {self.base_value:.6f}")
+        print(f" Phase 2d: TreeExplainer fitted. Base Value: {self.base_value:.6f}")
         
         if X_train is not None:
             print("calculate |SHAP| mean and standard deviation")
@@ -74,14 +78,14 @@ class ShapSafetyGate:
             
             mean_abs_attribs = np.mean(abs_covid_shap, axis=0)
             self.covid_shap_means = pd.Series(mean_abs_attribs, index=X_train.columns)
-            print(f"✅ Phase 2f: COVID-fold SHAP analysis complete ({len(covid_indices)} days).")
+            print(f"Phase 2f: COVID-fold SHAP analysis complete ({len(covid_indices)} days).")
             
             covid_features = X_train.iloc[covid_indices]
             self.covid_raw_medians = covid_features.median()
             self.covid_raw_90th = covid_features.quantile(0.90)
-            print("✅ Phase 2g: Raw feature percentiles computed for COVID-fold calibration.")
+            print(" Phase 2g: Raw feature percentiles computed for COVID-fold calibration.")
         else:
-            print("⚠️ Warning: No historical COVID-19 dates found in the X_train index.")
+            print(" Warning: No historical COVID-19 dates found in the X_train index.")
 
     def evaluate_prediction_safety(self, X_row, egarch_pred, xgb_adjustment):
         """
@@ -125,15 +129,13 @@ class ShapSafetyGate:
         # -------------------------------------------------------------
         # Phase 2i: SHAP-based Out-of-Distribution (OOD) Guard
         # -------------------------------------------------------------
-        # Extract the raw SHAP values for the current row
         row_shap = self.compute_shap_values(X_row_df)[0]
         abs_row_shap = np.abs(row_shap)
         
-        # Compute z-scores for each feature's contribution against training baselines
+        # Compute z-scores for each feature's contribution
         shap_z_scores = (abs_row_shap - self.shap_means.values) / self.shap_stds.values
         max_shap_z = np.max(shap_z_scores)
         
-        # Identify the feature with the highest attribution deviation
         most_anomalous_idx = np.argmax(shap_z_scores)
         most_anomalous_feat = X_row_df.columns[most_anomalous_idx]
         
@@ -143,6 +145,28 @@ class ShapSafetyGate:
                 "shap_value": row_shap[most_anomalous_idx],
                 "z_score": max_shap_z,
                 "threshold": self.threshold_std
+            }
+
+        # -------------------------------------------------------------
+        # Phase 2j: SHAP Attribution Concentration Guard
+        # -------------------------------------------------------------
+        total_abs_attribution = np.sum(abs_row_shap)
+        
+        if total_abs_attribution > 0:
+            max_attrib = np.max(abs_row_shap)
+            concentration_ratio = max_attrib / total_abs_attribution
+            max_attrib_idx = np.argmax(abs_row_shap)
+            max_attrib_feat = X_row_df.columns[max_attrib_idx]
+        else:
+            concentration_ratio = 0.0
+            max_attrib_feat = "None"
+            
+        if concentration_ratio > self.max_concentration_ratio:
+            return "REJECTED", "SHAP_CONCENTRATION_LIMIT", {
+                "trigger_feature": max_attrib_feat,
+                "concentration_ratio": concentration_ratio,
+                "limit": self.max_concentration_ratio,
+                "total_abs_attribution": total_abs_attribution
             }
 
         # If all active guards pass

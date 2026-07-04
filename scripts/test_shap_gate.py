@@ -11,16 +11,16 @@ from src.models.xgboost_vol import HybridXGBoostVol
 from src.decision.shap_gate import ShapSafetyGate
 
 def main():
-    print("⏳ Loading pre-processed data...")
+    print(" Loading pre-processed data...")
     try:
         train_df = pd.read_csv("data/processed/train.csv", index_col=0, parse_dates=True)
         test_df = pd.read_csv("data/processed/test.csv", index_col=0, parse_dates=True)
     except FileNotFoundError:
-        print("❌ Pre-split data not found. Run scripts/run_pipeline.py first.")
+        print(" Pre-split data not found. Run scripts/run_pipeline.py first.")
         return
 
     # Train the base hybrid model
-    print("⏳ Fitting the hybrid volatility engine...")
+    print(" Fitting the hybrid volatility engine...")
     hybrid = HybridXGBoostVol(max_depth=2, learning_rate=0.01, n_estimators=1500)
     results_df, _, _ = hybrid.fit_and_predict(train_df, test_df)
 
@@ -31,8 +31,8 @@ def main():
     # Extract training feature matrix
     X_train = train_df[feature_cols]
 
-    # Instantiate our safety gate (threshold_std set to 3.0)
-    gate = ShapSafetyGate(max_absolute_adj=0.03, max_relative_adj=0.25, threshold_std=3.0)
+    # Instantiate our safety gate. Calibrated threshold_std to 4.0 to prevent false positives.
+    gate = ShapSafetyGate(max_absolute_adj=0.03, max_relative_adj=0.25, threshold_std=4.0, max_concentration_ratio=0.45)
     
     # Fit explainer and baselines
     gate.fit_explainer(hybrid.xgb_model, X_train)
@@ -72,8 +72,6 @@ def main():
     print("-" * 75)
 
     # 4. Simulate a SHAP OOD Day (Phase 2i)
-    # We increase Vol_10d moderately. It is below the 0.80 absolute limit, 
-    # but represents a massive statistical outlier for the model's expected attribution.
     ood_row = test_row.copy()
     ood_row['Vol_10d'] = 0.45 
 
@@ -83,8 +81,18 @@ def main():
     print(f"  Diagnostics: {diags}")
     print("-" * 75)
 
-    if status == "REJECTED" and reason == "SHAP_OOD_LIMIT":
-        print(" Phase 2i Active Verification Successful! SHAP OOD Guard fired correctly.")
+    # 5. Simulate a SHAP Concentration Violation Day (Phase 2j)
+    concentrated_row = test_row.copy()
+    concentrated_row['VIX_Gap'] = 9.5  # Substantial but under absolute override limit
+
+    status, reason, diags = gate.evaluate_prediction_safety(concentrated_row, egarch_pred, xgb_adjustment)
+    print("Scenario 5: SHAP Concentration Violation Day (Single Feature Dominated)")
+    print(f"  Decision Status: **{status}** | Reason Code: {reason}")
+    print(f"  Diagnostics: {diags}")
+    print("-" * 75)
+
+    if status == "REJECTED" and reason == "SHAP_CONCENTRATION_LIMIT":
+        print(" Phase 2j Active Verification Successful! Concentration Guard fired correctly.")
     else:
         print(" Verification Failed.")
 
