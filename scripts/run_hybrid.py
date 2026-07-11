@@ -15,8 +15,8 @@ def main():
     print("Starting the Integrated Hybrid Volatility Prediction Engine...")
     
     # Configure local SQLite database tracking
-    mlflow.set_tracking_uri("sqlite:///mlflow.db")
-    mlflow.set_experiment("Hybrid_Vol_Prediction_Engine")
+    mlflow.set_tracking_uri("sqlite:///mlflow.db")#initiate the mlflow database
+    mlflow.set_experiment("Hybrid_Vol_Prediction_Engine")# creating an experiment file
 
     # Load pre-split data
     try:
