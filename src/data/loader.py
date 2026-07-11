@@ -14,7 +14,7 @@ def fetch_data():
     if not os.path.exists(RAW_DIR):
         os.makedirs(RAW_DIR)
     
-    print(f"📂 Downloading Global Market Data to: {RAW_DIR}")
+    print(f"Downloading Global Market Data to: {RAW_DIR}")
     
     # Download symbols individually to process returns on native calendars
     print("   Fetching S&P 500 (^GSPC)...")
@@ -57,7 +57,7 @@ def fetch_data():
     save_path = os.path.join(RAW_DIR, "global_markets.csv")
     master_df.to_csv(save_path)
     
-    print(f"   ✅ Saved Global Data. Final shape: {master_df.shape}")
+    print(f"   Saved Global Data. Final shape: {master_df.shape}")
     print(f"   Note: The dataset runs from {master_df.index.min().date()} to {master_df.index.max().date()}")
 
 if __name__ == "__main__":

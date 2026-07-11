@@ -10,11 +10,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
 
 def split_data():
-    print("✂️  Initiating Chronological Data Split...")
+    print(" Initiating Chronological Data Split...")
     input_path = os.path.join(PROCESSED_DIR, "features.csv")
     
     if not os.path.exists(input_path):
-        print("❌ Error: features.csv not found! Run feature_builder.py first.")
+        print(" Error: features.csv not found! Run feature_builder.py first.")
         return
     
     # Load the newly generated features (2000-2026)
@@ -37,16 +37,16 @@ def split_data():
     train_df.to_csv(train_path)
     test_df.to_csv(test_path) 
     
-    print(f"✅ Split Complete!")
+    print(f" Split Complete!")
     print(f"   Train Set: {len(train_df)} rows ({train_df.index.min().date()} to {train_df.index.max().date()})")
     print(f"   Test Set:  {len(test_df)} rows ({test_df.index.min().date()} to {test_df.index.max().date()})")
     
     # Quick validation to prove no Data Leakage to your professor
     print("\n🔍 Checking for Data Leakage...")
     if train_df.index.max() >= test_df.index.min():
-        print("   ⚠️ WARNING: Time overlap detected. Check index.")
+        print("   WARNING: Time overlap detected. Check index.")
     else:
-        print("   ✅ Time-series integrity confirmed. No look-ahead bias.")
+        print("    Time-series integrity confirmed. No look-ahead bias.")
 
 if __name__ == "__main__":
     split_data()

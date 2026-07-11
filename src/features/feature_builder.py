@@ -78,7 +78,7 @@ class FeaturePipeline:
             
         save_path = os.path.join(PROCESSED_DIR, "features.csv")
         self.df.to_csv(save_path)
-        print(f"✅ Success! Data saved to: {save_path}")
+        print(f" Success! Data saved to: {save_path}")
         print(f"   Final Shape: {self.df.shape}")
         print(f"   Columns Created: {self.df.shape[1]}")
 

@@ -72,7 +72,7 @@ def run_fight():
         if len(test_slice) == 0:
             break
             
-        print(f"\n⚡ Processing Fold {fold} | Out-of-sample: {test_slice.index[0].date()} to {test_slice.index[-1].date()} ({len(test_slice)} days)")
+        print(f"\n Processing Fold {fold} | Out-of-sample: {test_slice.index[0].date()} to {test_slice.index[-1].date()} ({len(test_slice)} days)")
         actual_targets.extend(test_slice['Target_Vol_Next_5d'].values)
         
         # 1. Naive Model
@@ -115,7 +115,7 @@ def run_fight():
     actual_targets = pd.Series(actual_targets)
     
     print("\n" + "="*75)
-    print("📈 WALK-FORWARD ACCURACY METRICS (Aggregate Out-of-Sample)")
+    print(" WALK-FORWARD ACCURACY METRICS (Aggregate Out-of-Sample)")
     print("="*75)
 
     # Compute and log aggregate out-of-sample metrics for all models
