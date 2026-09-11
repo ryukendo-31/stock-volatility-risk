@@ -6,10 +6,15 @@ from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 def compute_qlike_loss(y_true, y_pred):
-    """Computes QLIKE loss."""
-    y_true = np.clip(np.array(y_true), 1e-6, None)
-    y_pred = np.clip(np.array(y_pred), 1e-6, None)
-    return np.mean(np.log(y_pred) + (y_true / y_pred) - 1)
+    """
+    Computes QLIKE loss. 
+    FIX C8: Patton (2011) QLIKE is a variance loss function. 
+    Since y_true and y_pred are volatilities (std deviations), we must square them first.
+    """
+    var_true = np.clip(np.array(y_true) ** 2, 1e-8, None)
+    var_pred = np.clip(np.array(y_pred) ** 2, 1e-8, None)
+    
+    return np.mean(np.log(var_pred) + (var_true / var_pred) - 1)
 
 def calculate_statistical_diagnostics(fit_result, actual_vol, predicted_vol):
     """Computes goodness-of-fit, residual tests, and out-of-sample loss metrics."""
@@ -64,7 +69,12 @@ def calculate_statistical_diagnostics(fit_result, actual_vol, predicted_vol):
     return diagnostics
 
 def diebold_mariano_test(y_true, y_pred1, y_pred2, h=5, power=2):
-    """Computes the Diebold-Mariano test for predictive accuracy using Newey-West variance."""
+    """
+    Computes the Diebold-Mariano test for predictive accuracy using Newey-West variance.
+    Sign Convention: 
+    - A negative dm_stat means Model 1 (y_pred1) has smaller errors (is better).
+    - A positive dm_stat means Model 2 (y_pred2) has smaller errors (is better).
+    """
     common_idx = y_true.index.intersection(y_pred1.index).intersection(y_pred2.index)
     y_true = y_true.loc[common_idx].values
     y_pred1 = y_pred1.loc[common_idx].values
