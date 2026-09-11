@@ -1,11 +1,5 @@
-# --- START OF FILE run_pipeline.py ---
+# scripts/run_pipeline.py
 import os
-import sys
-
-# Ensure the 'src' directory is in the Python path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Import the main functions from your scripts
 from src.data.loader import fetch_data
 from src.features.feature_builder import FeaturePipeline
 from src.data.splitter import split_data
@@ -37,4 +31,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# --- END OF FILE run_pipeline.py ---
