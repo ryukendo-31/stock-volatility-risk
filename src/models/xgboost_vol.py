@@ -9,14 +9,11 @@ from src.decision.shap_gate import ShapSafetyGate
 class HybridXGBoostVol:
     def __init__(self, max_depth=2, learning_rate=0.01, n_estimators=1000, reg_alpha=5.0, reg_lambda=10.0, 
                  threshold_std=3.5, max_concentration_ratio=0.80, min_rank_correlation=0.40):
-        # XGBoost parameters
         self.max_depth = max_depth
         self.learning_rate = learning_rate
         self.n_estimators = n_estimators
         self.reg_alpha = reg_alpha
         self.reg_lambda = reg_lambda
-        
-        # Safety Gate parameters
         self.threshold_std = threshold_std
         self.max_concentration_ratio = max_concentration_ratio
         self.min_rank_correlation = min_rank_correlation
@@ -29,47 +26,35 @@ class HybridXGBoostVol:
     def fit_and_predict(self, train_df, test_df):
         print("1. Fitting baseline Student-t EGARCH(1,1,1) on training set...")
         
-        # Scale returns by 100 for optimization stability in 'arch'
         returns_train = train_df['Log_Ret'] * 100
         returns_test = test_df['Log_Ret'] * 100
         returns_full = pd.concat([returns_train, returns_test])
         
         split_date = train_df.index[-1]
         
-        # Fit the baseline EGARCH model
         self.egarch_model = arch_model(returns_full, vol='EGARCH', p=1, o=1, q=1, dist='t')
         self.egarch_fit = self.egarch_model.fit(last_obs=split_date, disp='off')
         
-        # -------------------------------------------------------------------------------------
-        # FIX C2: MATCHING TRAIN AND TEST RESIDUAL COMPUTATION
-        # We must compute 5-step simulation forecasts on the training set, not 1-step variances.
-        # -------------------------------------------------------------------------------------
         print("   Generating 5-step simulated historical forecasts for XGBoost target...")
-        rng = np.random.default_rng(42) # Seed to ensure reproducible numbers
+        # FIX: Seed NumPy globally
+        np.random.seed(42)
         
-        # We start forecasting 252 days into the training set to allow the model to burn in.
         burn_in = train_df.index[252]
+        eg_train_forecasts = self.egarch_fit.forecast(start=burn_in, horizon=5, align='origin', method='simulation', simulations=1000)
         
-        # Generate expanding window 5-day forecasts for the training data
-        eg_train_forecasts = self.egarch_fit.forecast(start=burn_in, horizon=5, align='origin', method='simulation', simulations=1000, rng=rng)
-        
-        # Average the 5-day variance paths for the training set
         train_mean_variance = eg_train_forecasts.variance.mean(axis=1)
         egarch_train_pred = np.sqrt(train_mean_variance) / 100 * np.sqrt(252)
         egarch_train_pred = egarch_train_pred.dropna()
         
-        # Generate EGARCH testing predictions (simulation path-based)
-        eg_test_forecasts = self.egarch_fit.forecast(start=split_date, horizon=5, method='simulation', simulations=1000, rng=rng)
+        eg_test_forecasts = self.egarch_fit.forecast(start=split_date, horizon=5, method='simulation', simulations=1000)
         test_var_preds = eg_test_forecasts.variance.reindex(test_df.index)
         test_mean_variance = test_var_preds.mean(axis=1)
         egarch_test_pred = np.sqrt(test_mean_variance) / 100 * np.sqrt(252)
         
-        # Calculate training residuals (Actual - Predicted) over the valid simulation window
         train_targets = train_df['Target_Vol_Next_5d'].reindex(egarch_train_pred.index)
         train_residuals = train_targets - egarch_train_pred
         train_residuals = train_residuals.dropna()
         
-        # Exclude target and raw returns from features
         cols_to_exclude = ['Target_Vol_Next_5d', 'Log_Ret', 'Nifty_Ret']
         feature_cols = [col for col in train_df.columns if col not in cols_to_exclude]
         
@@ -90,7 +75,7 @@ class HybridXGBoostVol:
             subsample=0.8,
             colsample_bytree=0.8,
             early_stopping_rounds=50,
-            random_state=42 # Seed XGBoost
+            random_state=42 
         )
         
         self.xgb_model.fit(
@@ -119,7 +104,6 @@ class HybridXGBoostVol:
         max_z_scores = []
         xgb_adjustments = []
         
-        # Evaluate each day sequentially
         for idx in range(len(X_test)):
             row = X_test.iloc[[idx]]
             eg_pred = egarch_test_pred.iloc[idx]

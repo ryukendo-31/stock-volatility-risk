@@ -12,7 +12,8 @@ from src.evaluation.diagnostics import diebold_mariano_test, compute_qlike_loss
 def main():
     print("Starting the Integrated Hybrid Volatility Prediction Engine...")
     
-    # Configure MLflow (removed forced SQLite)
+    # Use SQLite (required by modern MLflow). It is safely ignored by Git via .gitignore!
+    mlflow.set_tracking_uri("sqlite:///mlflow.db")
     mlflow.set_experiment("Hybrid_Vol_Prediction_Engine")
 
     try:

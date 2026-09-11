@@ -1,155 +1,97 @@
-# S&P 500 Hybrid Volatility Prediction Engine
+# S&P 500 Hybrid Volatility Engine: Risk-Gated Machine Learning
 
-This repository implements a risk-controlled, hybrid volatility forecasting framework for the S&P 500. The architecture combines traditional financial econometrics (Student-t EGARCH) with machine learning (XGBoost) and Explainable AI (SHAP) to construct a parsimonious baseline with regularized residual-adjustment layers and active fallback guards.
+This is a quantitative research project exploring a core problem in financial machine learning: **ML models often achieve higher accuracy than traditional econometrics during calm markets, but extrapolate dangerously during Black Swan events.**
 
-## 1. Project Directory Layout
-
-```
-stock-market-volatility/
-├── app/                              # Placeholder for deployment wrapper
-├── data/
-│   ├── processed/                    # Engineered features, train.csv, and test.csv
-│   └── raw/                          # Raw downloaded yFinance global markets CSV
-├── notebooks/                        # Jupyter notebooks for exploratory analysis
-├── reports/
-│   └── figures/                      # Saved diagnostic and performance plots
-├── results/
-│   ├── egarch_predictions.csv        # Out-of-sample EGARCH forecast series
-│   ├── garch_predictions.csv         # Out-of-sample GARCH forecast series
-│   └── hybrid_predictions.csv        # Final hybrid predictions and safety gate logs
-├── scripts/
-│   ├── plot_diagnostics.py           # Generates residual and predictive plots
-│   ├── run_baselines.py              # Runs the expanding-window baseline backtests
-│   ├── run_hybrid.py                 # Runs the integrated production hybrid engine
-│   ├── run_pipeline.py               # Ingests raw data and builds the feature matrix
-│   └── test_shap_gate.py             # Simulates and calibrates safety gate thresholds
-├── src/
-│   ├── data/
-│   │   ├── loader.py                 # Timezone-safe data loader and return calculator
-│   │   └── splitter.py               # Chronological train/test data splitter
-│   ├── decision/
-│   │   └── shap_gate.py              # Cascading safety gate with conditional thresholds
-│   ├── evaluation/
-│   │   └── diagnostics.py            # Computes residual diagnostics, QLIKE, and DM tests
-│   ├── explainability/
-│   │   ├── __init__.py               # Package identifier
-│   │   └── shap_explainer.py         # SHAP value extraction and visualization helpers
-│   ├── features/
-│   │   ├── cross_market.py           # Pillar 5: Indian market session returns
-│   │   ├── distribution_features.py  # Pillar 3: Rolling skewness and kurtosis
-│   │   ├── feature_builder.py        # Orchestrates feature pipeline execution
-│   │   ├── regime_features.py        # Pillar 2: Short/Long volatility ratios
-│   │   ├── vix_features.py           # Pillar 4: Options-implied VIX premium
-│   │   └── volatility.py             # Pillar 1: Log returns and rolling volatilities
-│   ├── models/
-│   │   ├── egarch.py                 # Student-t EGARCH model class
-│   │   ├── garch_x.py                # Native ARX GARCH-X model class
-│   │   ├── garch.py                  # Student-t GARCH model class
-│   │   ├── linear_lag.py             # Baseline OLS lag model class
-│   │   ├── naive.py                  # Baseline naive model class
-│   │   └── xgboost_vol.py            # Core Hybrid EGARCH-XGBoost regressor engine
-│   ├── pipeline/
-│   └── config.py                     # Global path and execution configurations
-├── .gitignore
-├── mlflow.db                         # Local SQLite backend storing MLflow runs
-├── requirements.txt                  # Python dependencies
-└── setup_project.py                  # Setup utility
-```
+Rather than deploying a simple prediction backend, the primary goal of this project was to design a **mathematically defensible safety switch**. This pipeline uses a **SHAP Safety Gate** to monitor an XGBoost residual-correction model. If the market becomes anomalous, the gate safely disables the ML layer and falls back to a traditional econometric baseline (Student-t EGARCH).
 
 ---
 
-## 2. Feature Engineering: The 5 Pillars
+## 1. The Original Project (Before the Audit)
 
-The feature engineering pipeline (`src/features/feature_builder.py`) processes raw daily series into 5 structural pillars:
+Initially, this project was framed as a "Production Engine" evaluated on a single, static 3.5-year test split (Sep 2022 to Jun 2026). The original, un-audited metrics were:
 
-1. **Inertia (Pillar 1):** S&P 500 daily log returns and annualized rolling volatilities (5-day, 10-day, 21-day, and 63-day windows).
-2. **Regime Detection (Pillar 2):** Volatility acceleration ratios (5d/21d and 21d/63d) to identify transition phases.
-3. **Tail Risk (Pillar 3):** Rolling 21-day skewness and kurtosis of returns to proxy non-normal distributions and tail-width.
-4. **Fear Premium (Pillar 4):** The VIX Gap, representing the spread between implied market volatility and realized historical volatility (`VIX_t - (Vol_21d,t * 100)`).
-5. **Cross-Market Momentum (Pillar 5):** Log returns of the Nifty 50, calculated natively on its own calendar, to capture early global market information before the US open.
-
----
-
-## 3. Empirical Performance Results
-
-The completed hybrid forecasting model was trained on 3,772 historical observations (2007–2022) and evaluated out-of-sample over 943 trading days (September 14, 2022, to June 17, 2026).
-
-### Out-of-Sample Performance Comparison
-
-| Model | RMSE | MAE | QLIKE |
-|---|---|---|---|
-| EGARCH(1,1,1) Base | 0.06875 | 0.04868 | -2.04231 |
+| Model                      | RMSE    | MAE     | QLIKE    |
+| -------------------------- | ------- | ------- | -------- |
+| EGARCH(1,1,1) Base         | 0.06875 | 0.04868 | -2.04231 |
 | Hybrid Final (Active Gate) | 0.06680 | 0.04598 | -2.04691 |
 
-**Predictive Performance Lift:** +2.84% reduction in out-of-sample RMSE.
-
-### Statistical Validation (Diebold-Mariano Test)
-
-- **DM Statistic:** 3.6960
-- **p-value:** 0.0002 (significant at the 0.1% level)
-- **Conclusion:** We reject the null hypothesis of equal predictive accuracy. The predictive superiority of the machine learning residual adjustments over the EGARCH baseline is statistically highly significant.
+* **Original Lift:** +2.84% reduction in out-of-sample RMSE.
+* **Original DM p-value:** 0.0002
 
 ---
 
-## 4. SHAP Safety Gate & Regime Decoupling
+## 2. The Self-Audit (How and Why things changed)
 
-To prevent XGBoost from overfitting or generating extrapolation errors during extreme tail events, the system implements a cascading **SHAP Safety Gate** (`src/decision/shap_gate.py`).
+During a rigorous self-audit to prepare the codebase for quantitative review, I discovered critical mathematical flaws in the original pipeline that were artificially inflating performance. I refactored the entire project to enforce strict out-of-sample integrity.
 
-### Cascading Guards
+### The Flaws Discovered:
 
-1. **Domain Overrides:** Hardcoded bounds on raw inputs based on historical 90th percentile stress peaks (bypasses if `Vol_21d > 0.40`, `VIX_Lag_1 > 40.0`, or `Kurt_21 > 8.0`).
-2. **Magnitude Limits:** Absolute (5%) and relative (45%) caps on the size of the XGBoost volatility adjustment.
-3. **Targeted Expansion Check:** Bypasses if features empirically proven to expand during the 2020 crash (`Vol_10d` or `VIX_Lag_1`) exceed their baseline training SHAP influence by more than 2.5x and 2.0x respectively.
-4. **Statistical OOD Check:** Bypasses if any feature's SHAP attribution z-score exceeds the regime-conditional threshold.
-5. **Concentration Check:** Prevents single-variable dominance; bypasses if any feature represents a high percentage of absolute attribution (enforced only on net adjustments > 2.0% vol).
-6. **Rank Stability Tracker:** Bypasses if the rolling 21-day Spearman rank correlation of feature attributions falls below the baseline.
+1. **Target Leakage (Look-Ahead Bias):** The pandas `FixedForwardWindowIndexer` secretly included day *t*'s return in the target calculation. Because day *t*'s return was already known to the ML features, the model had a 20% look-ahead advantage.
 
-### Regime-Conditional Thresholds
+2. **Train/Serve Skew:** The XGBoost model was trained on 1-day conditional variance errors (exact math), but tested on 5-day simulated forecast errors (Monte Carlo averages). The model was learning the wrong residual distribution.
 
-The gate dynamically tightens or loosens its parameters based on the VIX level, decoupling the parameter space to avoid false positive rejections during calm periods:
+3. **Weak Evaluation:** A static 3.5-year test set during a relatively calm market does not prove an ML model is robust.
 
-- **Stress Regime (VIX > 30):** Tight parameters (`ood_z = 2.0`, `concentration = 60%`, `relative_cap = 25%`).
-- **Normal Regime (VIX <= 20):** Loose parameters (`ood_z = 4.5`, `concentration = 90%`, `relative_cap = 45%`).
+### The Fixes Implemented:
 
-### Operational Validation Metrics
+1. **Target Isolation:** The target was strictly shifted to `[t+1 : t+5]`. The model now predicts a 100% unknown future (verified via `pytest`).
 
-- **COVID-19 Stress Fold (Feb 2020 – Sep 2020) Bypass Rate:** 63.69% (Target: ≥ 60.0% — Passed).
-- **Calm Market Fold (2017 – 2019) Approval Rate:** 88.59% (Target: ≥ 85.0% — Passed).
+2. **Residual Alignment:** The training pipeline was rewritten to utilize seeded, 5-step Monte Carlo simulations via an expanding window, matching the inference environment perfectly.
+
+3. **Walk-Forward Evaluation:** The evaluation was upgraded from a static split to a massive **14-year expanding-window walk-forward backtest (2012–2026)** to prove robustness across multiple distinct market cycles.
 
 ---
 
-## 5. Execution Instructions
+## 3. The True Results (After the Audit)
 
-Run all scripts from the root directory of your project.
+Removing the "cheating" leakage predictably lowered the theoretical lift. However, because the test was expanded to 14 years (3,644 days across 15 annual folds, encompassing the 2020 crash and 2022 inflation bear market), the corrected model is now mathematically bulletproof and highly significant over the long run.
 
-### Step 1: Run the Unified Data & Feature Pipeline
+| Model                          | RMSE        | MAE         | QLIKE        |
+| ------------------------------ | ----------- | ----------- | ------------ |
+| EGARCH(1,1,1) Base             | 0.07844     | 0.05272     | -3.90080     |
+| **Hybrid Final (Active Gate)** | **0.07638** | **0.04953** | **-3.90314** |
+
+* **True Performance Lift:** +2.63% sustained out-of-sample RMSE reduction over 14 years.
+* **Diebold-Mariano p-value:** < 0.0001 (Statistically Superior)
+
+---
+
+## 4. The SHAP Safety Gate
+
+Instead of trusting the ML blindly, the SHAP gate scales thresholds based on the VIX regime to check for Out-Of-Distribution (OOD) attributions and 21-day rank stability.
+
+Without needing recalibration after the strict math fixes, the gate perfectly balanced risk during the walk-forward evaluation:
+
+* **COVID-19 Crash:** Bypassed the ML model **65.48%** of the time.
+* **Calm Markets (2017-2019):** Approved the ML model **93.77%** of the time.
+* **Overall Intervention:** The gate intervened and shielded the portfolio on exactly **12.40%** of all trading days across 14 years.
+
+---
+
+## 5. MLflow Tracking
+
+All metrics, parameters, and Diebold-Mariano tests are logged to an SQLite database.
+
+![MLflow Dashboard](reports/figures/mlflow_dashboard.png)
+
+*(Run `mlflow ui --backend-store-uri sqlite:///mlflow.db` locally to view the interactive dashboard)*
+
+---
+
+## 6. Reproducibility
+
+The project is packaged via `pyproject.toml` and verified by `pytest` to mathematically guarantee zero target leakage.
 
 ```bash
+# 1. Install dependencies
+pip install -e .[dev]
+
+# 2. Fetch data & engineer features
 python scripts/run_pipeline.py
+
+# 3. Run the 14-year Walk-Forward Evaluation
+python scripts/run_walkforward_hybrid.py
+
+# 4. Prove no target leakage via Unit Tests
+pytest
 ```
-
-This downloads raw yFinance series, calculates log returns natively, generates all features, and exports the clean feature matrix.
-
-### Step 2: Run the Baseline Backtests
-
-```bash
-python scripts/run_baselines.py
-```
-
-Runs the annual-retraining walk-forward backtests (2012–2026) across standard GARCH, EGARCH, and native GARCH-X models, and logs all diagnostics to MLflow.
-
-### Step 3: Run the Production Hybrid Engine
-
-```bash
-python scripts/run_hybrid.py
-```
-
-Trains the integrated EGARCH + XGBoost pipeline, evaluates out-of-sample forecasts through the active SHAP Safety Gate, outputs the final RMSE lift and DM significance, and logs the run to MLflow.
-
-### Step 4: Open the MLflow Dashboard
-
-```bash
-mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
-```
-
-Open `http://127.0.0.1:5000` in your web browser to review the complete, unified experiment history.

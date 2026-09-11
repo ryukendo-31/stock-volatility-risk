@@ -16,15 +16,13 @@ class EgarchModel:
         returns = full_df['Log_Ret'] * 100 
         split_date = train_df.index[-1]
         
-        # Switched to 't' to capture fat-tailed return innovations
         am = arch_model(returns, vol='EGARCH', p=1, o=1, q=1, dist='t')
         res = am.fit(last_obs=split_date, disp='off')
         
-        # Seed the random number generator so multi-step Monte Carlo is reproducible
-        rng = np.random.default_rng(42)
+        # FIX: Seed NumPy globally so the internal Student-t simulation is reproducible
+        np.random.seed(42)
         
-        # Multi-step forecasting is simulated because EGARCH is non-linear in logs
-        forecasts = res.forecast(start=split_date, horizon=5, method='simulation', simulations=1000, rng=rng)
+        forecasts = res.forecast(start=split_date, horizon=5, method='simulation', simulations=1000)
         var_preds = forecasts.variance.reindex(test_df.index)
         
         mean_variance = var_preds.mean(axis=1)
@@ -42,7 +40,6 @@ class EgarchModel:
                 break
         
         os.makedirs("results", exist_ok=True)
-        # Avoid overwriting the file if this is run in a loop (like walk-forward)
         mode = 'a' if os.path.exists("results/egarch_predictions.csv") else 'w'
         header = not os.path.exists("results/egarch_predictions.csv")
         results_df.to_csv("results/egarch_predictions.csv", mode=mode, header=header)

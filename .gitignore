@@ -29,3 +29,7 @@ scripts/plot_diagnostics.py
 *.xlsx
 *.xlsm
 *.csv
+mlflow.db
+.pytest_cache/
+mlruns/
+*.egg-info/
