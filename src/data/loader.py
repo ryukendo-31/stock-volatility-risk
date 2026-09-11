@@ -47,9 +47,12 @@ def fetch_data():
     master_df = sp500_close.join(vix_close, how='left')
     master_df = master_df.join(nifty_close[['Nifty_Ret']], how='left')
     
-    # Safely carry forward previous values on holidays
-    master_df['VIX'] = master_df['VIX'].ffill()
-    master_df['Nifty_Ret'] = master_df['Nifty_Ret'].ffill()
+    # Safely handle missing values on holidays
+    master_df['VIX'] = master_df['VIX'].ffill() # VIX is a level, ffill is safe
+    
+    # Nifty_Ret is a return. If missing, the market was closed (0.0 return)
+    master_df['Nifty_Closed'] = master_df['Nifty_Ret'].isna().astype(int)
+    master_df['Nifty_Ret'] = master_df['Nifty_Ret'].fillna(0.0)
     
     # Drop rows without initial valid returns/prices
     master_df.dropna(subset=['Log_Ret', 'VIX'], inplace=True)

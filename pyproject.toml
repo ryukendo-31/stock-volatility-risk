@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "volatility-engine"
+version = "0.1.0"
+description = "Hybrid Volatility Prediction Engine"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "scikit-learn>=1.2.0",
+    "xgboost>=2.0.0",
+    "arch>=6.0.0",
+    "shap>=0.41.0",
+    "statsmodels>=0.14.0",
+    "scipy>=1.10.0",
+    "mlflow>=2.0.0",
+    "yfinance>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
