@@ -20,8 +20,11 @@ class EgarchModel:
         am = arch_model(returns, vol='EGARCH', p=1, o=1, q=1, dist='t')
         res = am.fit(last_obs=split_date, disp='off')
         
+        # Seed the random number generator so multi-step Monte Carlo is reproducible
+        rng = np.random.default_rng(42)
+        
         # Multi-step forecasting is simulated because EGARCH is non-linear in logs
-        forecasts = res.forecast(start=split_date, horizon=5, method='simulation')
+        forecasts = res.forecast(start=split_date, horizon=5, method='simulation', simulations=1000, rng=rng)
         var_preds = forecasts.variance.reindex(test_df.index)
         
         mean_variance = var_preds.mean(axis=1)
@@ -39,7 +42,10 @@ class EgarchModel:
                 break
         
         os.makedirs("results", exist_ok=True)
-        results_df.to_csv("results/egarch_predictions.csv")
+        # Avoid overwriting the file if this is run in a loop (like walk-forward)
+        mode = 'a' if os.path.exists("results/egarch_predictions.csv") else 'w'
+        header = not os.path.exists("results/egarch_predictions.csv")
+        results_df.to_csv("results/egarch_predictions.csv", mode=mode, header=header)
         
         eval_df = results_df.dropna(subset=['Actual_Vol', 'EGARCH_Pred'])
         if len(eval_df) == 0:

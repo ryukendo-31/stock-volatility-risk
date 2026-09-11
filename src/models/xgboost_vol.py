@@ -40,29 +40,43 @@ class HybridXGBoostVol:
         self.egarch_model = arch_model(returns_full, vol='EGARCH', p=1, o=1, q=1, dist='t')
         self.egarch_fit = self.egarch_model.fit(last_obs=split_date, disp='off')
         
-        # Generate EGARCH training predictions (annualized)
-        in_sample_var = self.egarch_fit.conditional_volatility.loc[train_df.index] ** 2
-        egarch_train_pred = np.sqrt(in_sample_var) / 100 * np.sqrt(252)
+        # -------------------------------------------------------------------------------------
+        # FIX C2: MATCHING TRAIN AND TEST RESIDUAL COMPUTATION
+        # We must compute 5-step simulation forecasts on the training set, not 1-step variances.
+        # -------------------------------------------------------------------------------------
+        print("   Generating 5-step simulated historical forecasts for XGBoost target...")
+        rng = np.random.default_rng(42) # Seed to ensure reproducible numbers
+        
+        # We start forecasting 252 days into the training set to allow the model to burn in.
+        burn_in = train_df.index[252]
+        
+        # Generate expanding window 5-day forecasts for the training data
+        eg_train_forecasts = self.egarch_fit.forecast(start=burn_in, horizon=5, align='origin', method='simulation', simulations=1000, rng=rng)
+        
+        # Average the 5-day variance paths for the training set
+        train_mean_variance = eg_train_forecasts.variance.mean(axis=1)
+        egarch_train_pred = np.sqrt(train_mean_variance) / 100 * np.sqrt(252)
+        egarch_train_pred = egarch_train_pred.dropna()
         
         # Generate EGARCH testing predictions (simulation path-based)
-        eg_forecasts = self.egarch_fit.forecast(start=split_date, horizon=5, method='simulation')
-        var_preds = eg_forecasts.variance.reindex(test_df.index)
-        mean_variance = var_preds.mean(axis=1)
-        egarch_test_pred = np.sqrt(mean_variance) / 100 * np.sqrt(252)
+        eg_test_forecasts = self.egarch_fit.forecast(start=split_date, horizon=5, method='simulation', simulations=1000, rng=rng)
+        test_var_preds = eg_test_forecasts.variance.reindex(test_df.index)
+        test_mean_variance = test_var_preds.mean(axis=1)
+        egarch_test_pred = np.sqrt(test_mean_variance) / 100 * np.sqrt(252)
         
-        # Calculate training residuals (Actual - Predicted)
-        train_residuals = train_df['Target_Vol_Next_5d'] - egarch_train_pred
+        # Calculate training residuals (Actual - Predicted) over the valid simulation window
+        train_targets = train_df['Target_Vol_Next_5d'].reindex(egarch_train_pred.index)
+        train_residuals = train_targets - egarch_train_pred
         train_residuals = train_residuals.dropna()
         
-        # Exclude target and raw returns/prices from features
+        # Exclude target and raw returns from features
         cols_to_exclude = ['Target_Vol_Next_5d', 'Log_Ret', 'Nifty_Ret']
         feature_cols = [col for col in train_df.columns if col not in cols_to_exclude]
         
         X_train = train_df.loc[train_residuals.index, feature_cols]
         y_train = train_residuals
         
-        print("2. Training XGBoost Regressor on EGARCH residuals...")
-        # Chronological train-validation split (last 15% of training data) for early stopping
+        print("2. Training XGBoost Regressor on matched 5-day EGARCH residuals...")
         val_split_idx = int(len(X_train) * 0.85)
         X_tr, X_val = X_train.iloc[:val_split_idx], X_train.iloc[val_split_idx:]
         y_tr, y_val = y_train.iloc[:val_split_idx], y_train.iloc[val_split_idx:]
@@ -76,7 +90,7 @@ class HybridXGBoostVol:
             subsample=0.8,
             colsample_bytree=0.8,
             early_stopping_rounds=50,
-            random_state=42
+            random_state=42 # Seed XGBoost
         )
         
         self.xgb_model.fit(
@@ -86,7 +100,6 @@ class HybridXGBoostVol:
         )
         
         print("3. Initializing and calibrating SHAP Safety Gate...")
-        # Fit the safety gate, passing X_test so COVID benchmarks are calculated out-of-sample
         X_test = test_df[feature_cols]
         self.safety_gate = ShapSafetyGate(
             max_absolute_adj=0.05,
@@ -106,22 +119,19 @@ class HybridXGBoostVol:
         max_z_scores = []
         xgb_adjustments = []
         
-        # Evaluate each day sequentially to maintain timeline integrity
+        # Evaluate each day sequentially
         for idx in range(len(X_test)):
             row = X_test.iloc[[idx]]
             eg_pred = egarch_test_pred.iloc[idx]
             
-            # Generate raw XGBoost adjustment prediction
             xgb_adj = self.xgb_model.predict(row)[0]
             xgb_adjustments.append(xgb_adj)
             
-            # Audit the prediction row via the safety gate
             status, reason, diags = self.safety_gate.evaluate_prediction_safety(row, eg_pred, xgb_adj)
             
             if status == "APPROVED":
                 final_pred = eg_pred + xgb_adj
             else:
-                # Force standard fallback to baseline econometric model
                 final_pred = eg_pred
                 
             final_hybrid_preds.append(final_pred)
@@ -133,7 +143,6 @@ class HybridXGBoostVol:
         final_hybrid_preds = np.clip(np.array(final_hybrid_preds), 0.01, None)
         final_hybrid_preds = pd.Series(final_hybrid_preds, index=test_df.index)
         
-        # Save complete predictions and safety decisions for Phase 2o logging
         results_df = pd.DataFrame({
             'Actual': test_df['Target_Vol_Next_5d'],
             'EGARCH_Base': egarch_test_pred,
