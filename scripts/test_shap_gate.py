@@ -61,7 +61,7 @@ def main():
         max_depth=2, 
         learning_rate=0.01, 
         n_estimators=1500,
-        threshold_std=4.5,            
+        threshold_std=4.4,            
         max_concentration_ratio=0.90, 
         min_rank_correlation=0.40
     )

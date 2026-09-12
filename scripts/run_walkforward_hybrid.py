@@ -90,7 +90,7 @@ def main():
     hybrid_mae = mean_absolute_error(actuals, hybrid_preds)
     hybrid_qlike = compute_qlike_loss(actuals, hybrid_preds)
     
-    rmse_lift = (eg_rmse - hybrid_rmse) / eg_rmse * 100
+    rmse_lift = ((eg_rmse - hybrid_rmse) / eg_rmse * 100) if eg_rmse > 0 else 0.0
     
     total_days = len(final_wf_results)
     bypassed_days = sum(final_wf_results['Gate_Decision'] == "REJECTED")
