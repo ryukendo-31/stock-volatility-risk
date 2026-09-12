@@ -40,7 +40,16 @@ class ShapSafetyGate:
 
     def fit_explainer(self, xgb_model, X_train=None, X_test=None):
         self.best_iteration = getattr(xgb_model, "best_iteration", None)
-        self.explainer = shap.TreeExplainer(xgb_model, data=X_train)
+        # FIX (xgboost/shap compat): newer xgboost tree dumps trip shap's
+        # categorical-split guard when using the "interventional" (data=...)
+        # path, even with no categorical features present. feature_perturbation
+        # must be "tree_path_dependent" AND no background `data` may be passed —
+        # tree_path_dependent uses XGBoost's own fast contribs path and doesn't
+        # need (or accept) a background dataset; passing one silently falls back
+        # to the slow path that still hits the broken check.
+        self.explainer = shap.TreeExplainer(
+            xgb_model, feature_perturbation="tree_path_dependent"
+        )
         
         raw_expected = self.explainer.expected_value
         if isinstance(raw_expected, np.ndarray):
@@ -64,7 +73,16 @@ class ShapSafetyGate:
             target_shap = self.compute_shap_values(target_df)
             self.compute_covid_baselines(target_df, target_shap)
         else:
-            print("attribution calculation failed!!!")
+            # FIX: this used to just print a warning and let execution continue
+            # with shap_means/baseline_rankings left as None, which crashed later
+            # (AttributeError) deep inside evaluate_prediction_safety on whichever
+            # row first hit the OOD or Rank Stability gate. Fail here instead,
+            # at the actual root cause, with a clear message.
+            raise ValueError(
+                "ShapSafetyGate.fit_explainer() requires X_train to calibrate "
+                "shap_means/shap_stds/baseline_rankings. The gate cannot safely "
+                "evaluate predictions without it."
+            )
             
         return self
     
@@ -160,7 +178,16 @@ class ShapSafetyGate:
                 "xgb_adjustment": xgb_adjustment, "max_absolute_adj": thresholds['absolute_cap']
             }
             
-        relative_ratio = abs_adj / egarch_pred if egarch_pred > 0 else 0
+        if egarch_pred > 0:
+            relative_ratio = abs_adj / egarch_pred
+        else:
+            # FIX: previously defaulted silently to 0, which meant this gate
+            # could never reject when egarch_pred was non-positive (which should
+            # not happen for a volatility forecast in the first place). Treat it
+            # as a data-quality problem and reject rather than pass through.
+            return "REJECTED", "INVALID_EGARCH_BASELINE", {
+                "egarch_pred": egarch_pred, "xgb_adjustment": xgb_adjustment
+            }
         if relative_ratio > thresholds['relative_cap']:
             return "REJECTED", "MAGNITUDE_REL_LIMIT", {
                 "xgb_adjustment": xgb_adjustment, "relative_ratio": relative_ratio, "max_relative_adj": thresholds['relative_cap']
@@ -184,6 +211,14 @@ class ShapSafetyGate:
         # -------------------------------------------------------------
         # Phase 2i: SHAP-based Out-of-Distribution (OOD) Guard
         # -------------------------------------------------------------
+        # FIX: shap_means/shap_stds are indexed positionally against the X_train
+        # columns seen at calibration time. If a caller ever passes a row with a
+        # different column order, this silently mislabels which feature triggered
+        # a rejection. Fail loudly instead of guessing.
+        assert list(X_row_df.columns) == list(self.shap_means.index), (
+            "Feature order mismatch between evaluation row and calibrated shap_means "
+            f"(row: {list(X_row_df.columns)[:5]}..., calibrated: {list(self.shap_means.index)[:5]}...)"
+        )
         shap_z_scores = (abs_row_shap - self.shap_means.values) / self.shap_stds.values
         max_shap_z = np.max(shap_z_scores)
         most_anomalous_idx = np.argmax(shap_z_scores)
