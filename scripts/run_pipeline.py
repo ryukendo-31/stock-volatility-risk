@@ -1,33 +1,18 @@
 # scripts/run_pipeline.py
-import os
 from src.data.loader import fetch_data
 from src.features.feature_builder import FeaturePipeline
-from src.data.splitter import split_data
+
 
 def main():
-    """
-    Executes the entire data processing pipeline:
-    1. Downloads raw data.
-    2. Builds features.
-    3. Splits data into training and testing sets.
-    """
+    """Download raw data and build features. Evaluation is walk-forward only (no static split)."""
     print(" ========== STARTING DATA PIPELINE ========== ")
-    
-    # Step 1: Download raw data
-    print("\n[STEP 1/3] Fetching latest market data...")
+    print("\n[STEP 1/2] Fetching latest market data...")
     fetch_data()
-    
-    # Step 2: Engineer features
-    print("\n[STEP 2/3] Building features from raw data...")
-    pipeline = FeaturePipeline()
-    pipeline.load_data().apply_feature_engineering().save()
-    
-    # Step 3: Split data for modeling
-    print("\n[STEP 3/3] Splitting data into train and test sets...")
-    split_data()
-    
-    print("\n ========== DATA PIPELINE COMPLETED SUCCESSFULLY ========== ")
-    print(" now run 'run_baselines.py' to train and evaluate models.")
+    print("\n[STEP 2/2] Building features from raw data...")
+    FeaturePipeline().load_data().apply_feature_engineering().save()
+    print("\n ========== DATA PIPELINE COMPLETED ========== ")
+    print(" Next: python scripts/calibrate.py, then python scripts/run_walkforward_hybrid.py")
+
 
 if __name__ == "__main__":
     main()
