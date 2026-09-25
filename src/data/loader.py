@@ -1,67 +1,60 @@
 # src/data/loader.py
-import yfinance as yf
-import pandas as pd
 import numpy as np
-import os
+import pandas as pd
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RAW_DIR = os.path.join(BASE_DIR, "data", "raw")
+from src.config import RAW_DIR
 
-def fetch_data():
-    """Downloads US and Indian market data natively, avoiding holiday distortions."""
-    start_date = "2000-01-01" 
-    
-    if not os.path.exists(RAW_DIR):
-        os.makedirs(RAW_DIR)
-    
+
+def merge_market_data(sp500, vix, nifty):
+    """Merge daily closes onto the S&P 500 calendar without inventing data.
+
+    Returns are computed on each market's own calendar. After Nifty coverage begins, an S&P date
+    with no Nifty return means the Indian market was closed: Nifty_Ret = 0.0, Nifty_Closed = 1.
+    Before coverage begins (Yahoo's ^NSEI history starts in Sep 2007) nothing is known, so both
+    columns stay NaN instead of being zero-filled; XGBoost handles NaN natively.
+    """
+    sp = sp500[["Close"]].rename(columns={"Close": "Price"})
+    vx = vix[["Close"]].rename(columns={"Close": "VIX"})
+    nf = nifty[["Close"]].rename(columns={"Close": "NIFTY"})
+
+    sp["Log_Ret"] = np.log(sp["Price"] / sp["Price"].shift(1))
+    nf["Nifty_Ret"] = np.log(nf["NIFTY"] / nf["NIFTY"].shift(1))
+
+    df = sp.join(vx, how="left").join(nf[["Nifty_Ret"]], how="left")
+    df["VIX"] = df["VIX"].ffill()  # VIX is a level, so carrying it forward is safe
+
+    coverage_start = nf["Nifty_Ret"].first_valid_index()
+    covered = df.index >= coverage_start if coverage_start is not None else np.zeros(len(df), bool)
+    df["Nifty_Closed"] = np.where(covered, df["Nifty_Ret"].isna().astype(float), np.nan)
+    df.loc[covered, "Nifty_Ret"] = df.loc[covered, "Nifty_Ret"].fillna(0.0)
+
+    return df.dropna(subset=["Log_Ret", "VIX"])
+
+
+def _download_close(ticker, start):
+    import yfinance as yf  # imported lazily so merge_market_data is testable offline
+
+    data = yf.download(ticker, start=start, progress=False)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    return data
+
+
+def fetch_data(start_date="2000-01-01"):
+    """Downloads S&P 500, VIX and Nifty 50 and saves the merged raw dataset."""
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Downloading Global Market Data to: {RAW_DIR}")
-    
-    # Download symbols individually to process returns on native calendars
-    print("   Fetching S&P 500 (^GSPC)...")
-    sp500 = yf.download('^GSPC', start=start_date, progress=False)
-    if isinstance(sp500.columns, pd.MultiIndex):
-        sp500.columns = sp500.columns.get_level_values(0)
-    
-    print("   Fetching VIX (^VIX)...")
-    vix = yf.download('^VIX', start=start_date, progress=False)
-    if isinstance(vix.columns, pd.MultiIndex):
-        vix.columns = vix.columns.get_level_values(0)
-        
-    print("   Fetching Nifty 50 (^NSEI)...")
-    nifty = yf.download('^NSEI', start=start_date, progress=False)
-    if isinstance(nifty.columns, pd.MultiIndex):
-        nifty.columns = nifty.columns.get_level_values(0)
+    frames = {name: _download_close(t, start_date) for name, t in
+              [("sp500", "^GSPC"), ("vix", "^VIX"), ("nifty", "^NSEI")]}
+    master_df = merge_market_data(frames["sp500"], frames["vix"], frames["nifty"])
 
-    # Clean individual Series
-    sp500_close = sp500[['Close']].rename(columns={'Close': 'Price'})
-    vix_close = vix[['Close']].rename(columns={'Close': 'VIX'})
-    nifty_close = nifty[['Close']].rename(columns={'Close': 'NIFTY'})
-
-    # Compute returns natively on original market calendars to avoid holiday artifacts
-    print("   Computing returns on native market calendars...")
-    sp500_close['Log_Ret'] = np.log(sp500_close['Price'] / sp500_close['Price'].shift(1))
-    nifty_close['Nifty_Ret'] = np.log(nifty_close['NIFTY'] / nifty_close['NIFTY'].shift(1))
-
-    # Join datasets relative to the US trading calendar
-    print("   Merging datasets relative to the S&P 500 calendar...")
-    master_df = sp500_close.join(vix_close, how='left')
-    master_df = master_df.join(nifty_close[['Nifty_Ret']], how='left')
-    
-    # Safely handle missing values on holidays
-    master_df['VIX'] = master_df['VIX'].ffill() # VIX is a level, ffill is safe
-    
-    # Nifty_Ret is a return. If missing, the market was closed (0.0 return)
-    master_df['Nifty_Closed'] = master_df['Nifty_Ret'].isna().astype(int)
-    master_df['Nifty_Ret'] = master_df['Nifty_Ret'].fillna(0.0)
-    
-    # Drop rows without initial valid returns/prices
-    master_df.dropna(subset=['Log_Ret', 'VIX'], inplace=True)
-    
-    save_path = os.path.join(RAW_DIR, "global_markets.csv")
+    save_path = RAW_DIR / "global_markets.csv"
     master_df.to_csv(save_path)
-    
+    first_nifty = master_df["Nifty_Ret"].first_valid_index()
     print(f"   Saved Global Data. Final shape: {master_df.shape}")
-    print(f"   Note: The dataset runs from {master_df.index.min().date()} to {master_df.index.max().date()}")
+    print(f"   Dataset runs {master_df.index.min().date()} to {master_df.index.max().date()}; "
+          f"Nifty data starts {first_nifty.date() if first_nifty is not None else 'never'}")
+
 
 if __name__ == "__main__":
     fetch_data()

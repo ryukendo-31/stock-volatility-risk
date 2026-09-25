@@ -3,17 +3,19 @@ import pandas as pd
 import numpy as np
 import os
 
-# Import our Specialist Modules directly (now enabled by pyproject.toml)
 from src.features.volatility import calculate_log_returns, calculate_rolling_volatility
 from src.features.regime_features import calculate_volatility_ratios
 from src.features.distribution_features import calculate_tail_risk
 from src.features.vix_features import calculate_vix_gap
 from src.features.cross_market import calculate_cross_market_features
 
-# Path Config
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RAW_DIR = os.path.join(BASE_DIR, "data", "raw")
-PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
+from src.config import FEATURES_PATH, PROCESSED_DIR, RAW_DIR, TARGET
+
+def load_features(path=FEATURES_PATH):
+    """Load engineered features for modelling. Nifty columns may be NaN before Sep 2007."""
+    df = pd.read_csv(path, index_col=0, parse_dates=True)
+    return df.dropna(subset=["Log_Ret", "VIX_Gap", TARGET])
+
 
 class FeaturePipeline:
     def __init__(self):
@@ -56,8 +58,11 @@ class FeaturePipeline:
         # By shifting Log_Ret by -1 first, the window strictly covers [t+1, t+2, t+3, t+4, t+5]
         self.df['Target_Vol_Next_5d'] = self.df['Log_Ret'].shift(-1).rolling(window=indexer).std() * np.sqrt(252)
         
-        # Drop rows with NaNs resulting from lags and the forward window
-        self.df.dropna(inplace=True)
+        # Drop rows with NaNs from rolling windows, lags and the forward target window.
+        # Nifty columns are exempt: they are legitimately missing before Yahoo's coverage starts
+        # (Sep 2007) and XGBoost handles NaN natively. Requiring them would silently delete 2000-2007.
+        required = [c for c in self.df.columns if not c.lower().startswith("nifty")]
+        self.df.dropna(subset=required, inplace=True)
         
         # Drop absolute price/index columns so the model learns from relationships, not levels.
         cols_to_drop = ['Price', 'VIX', 'NIFTY'] 
